@@ -19,6 +19,10 @@ var/
 *.key
 .env
 
+# F2 landmark predictor weights (~99 MB) — fetched on demand via
+# scripts/fetch_landmarks.py, never committed.
+models/
+
 # Out-of-scope Figma frontend bundle — not part of the Python prototype
 # (CODING_STANDARDS §0 Scope Lock; FastAPI deferred, CLI-only this round).
 # Files stay on disk; remove these lines and re-add if frontend work is

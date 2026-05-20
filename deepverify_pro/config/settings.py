@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     amber_at: float = Field(default=0.40, ge=0.0, le=1.0)
     red_at: float = Field(default=0.70, ge=0.0, le=1.0)
     financial_amount_threshold: float = Field(default=10_000.0, ge=0.0)
+    # F2 — path to the dlib 68-point predictor (fetch via
+    # ``scripts/fetch_landmarks.py``; weights are never committed, ACM 1.6).
+    dlib_landmarks_path: Path = Field(default=Path("models/shape_predictor_68_face_landmarks.dat"))
 
 
 def get_settings() -> Settings:

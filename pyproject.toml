@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 audio = ["librosa>=0.10", "soundfile>=0.12"]      # F1 (M2)
-video = ["opencv-python>=4.9"]                     # F2 (M3); dlib added after install probe
+video = ["opencv-python>=4.9", "dlib>=20"]         # F2 (M3) — dlib 68-landmark predictor (§3)
 # F3 (M1) — C2PA via the external `c2patool` binary, owner-approved §3 deviation
 # (the `c2pa-python` 0.32.6 binding cannot produce a verifiable claim signature
 # for an offline self-signed signer; see CODING_STANDARDS §3). Install the
