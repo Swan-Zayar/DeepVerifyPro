@@ -10,6 +10,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+build/
 
 # Secrets & runtime artifacts — NEVER commit (CODING_STANDARDS §4.1)
 keys/
@@ -17,3 +18,21 @@ var/
 *.pem
 *.key
 .env
+
+# Out-of-scope Figma frontend bundle — not part of the Python prototype
+# (CODING_STANDARDS §0 Scope Lock; FastAPI deferred, CLI-only this round).
+# Files stay on disk; remove these lines and re-add if frontend work is
+# reintroduced via a discussed milestone.
+ATTRIBUTIONS.md
+BORDER_BEAM_INTEGRATION.md
+INTEGRATION_SUMMARY.md
+default_shadcn_theme.css
+index.html
+package.json
+pnpm-workspace.yaml
+postcss.config.mjs
+tsconfig.json
+tsconfig.node.json
+vite.config.ts
+src/
+guidelines/
