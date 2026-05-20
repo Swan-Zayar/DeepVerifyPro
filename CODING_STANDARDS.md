@@ -96,6 +96,7 @@ These substitutions were discussed and approved per the §3 rule ("do not substi
 - **PyTorch deferred.** The prototype baseline uses real feature extraction (librosa MFCC, 68-point landmarks) + a lightweight classical classifier (numpy / scikit-learn), labelled "not production-accurate" (§4.2). PyTorch is reintroduced only when a real trained model lands.
 - **68-point landmarks via `dlib`** (not mediapipe-468), to stay faithful to product.md §3.3's explicit "68 facial landmark points". Documented fallback: mediapipe-468 with a 68-subset mapping **only if `dlib` will not install**, disclosed in the model card as an approximation (§4.2).
 - **FastAPI deferred.** This round is CLI-only (Typer). FastAPI remains the pinned choice for the next round.
+- **C2PA via the official `c2patool` binary** (not the `c2pa-python` binding). `c2pa-python` 0.32.6 cannot produce a verifiable claim signature for an offline (no-TSA) self-signed signer — verified methodically: `from_info` no-TSA errors `Signature: empty string`; `from_callback` yields `claimSignature.mismatch` for ECDSA-raw, ECDSA-DER, and Ed25519 alike (while cert trust + data-hash bindings pass), proving a wrapper-level TBS defect, not an encoding mistake. `c2patool` is the CAI reference implementation; it signs/verifies offline self-signed correctly. Invoked locally only — no network, no TSA (honors §4.1). Still C2PA, still F3 — no product-scope change.
 
 ---
 

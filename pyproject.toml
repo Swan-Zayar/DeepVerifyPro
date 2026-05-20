@@ -18,7 +18,13 @@ dependencies = [
 [project.optional-dependencies]
 audio = ["librosa>=0.10", "soundfile>=0.12"]      # F1 (M2)
 video = ["opencv-python>=4.9"]                     # F2 (M3); dlib added after install probe
-provenance = ["c2pa>=0.5", "cryptography>=42"]     # F3 (M1)
+# F3 (M1) — C2PA via the external `c2patool` binary, owner-approved §3 deviation
+# (the `c2pa-python` 0.32.6 binding cannot produce a verifiable claim signature
+# for an offline self-signed signer; see CODING_STANDARDS §3). Install the
+# binary separately, e.g. `brew install c2patool`. `cryptography` mints the
+# self-signed ES256 test cert in `scripts/gen_test_cert.py`.
+provenance = ["cryptography>=42"]
+
 adk = ["google-adk>=0.1"]                          # orchestration (M6)
 cli = ["typer>=0.12", "sounddevice>=0.4", "mss>=9.0"]  # surface (M7)
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5", "black>=24", "mypy>=1.10"]
