@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepverify-pro"
+version = "0.0.1"
+description = "DeepVerify Pro — real-time deepfake detection + C2PA content provenance (working prototype)"
+requires-python = ">=3.11"
+# Always-needed core. Heavy/feature deps are installed per-milestone via extras
+# (incremental-milestones decision; CODING_STANDARDS §3 approved deviations).
+dependencies = [
+    "numpy>=1.26",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+]
+
+[project.optional-dependencies]
+audio = ["librosa>=0.10", "soundfile>=0.12"]      # F1 (M2)
+video = ["opencv-python>=4.9"]                     # F2 (M3); dlib added after install probe
+# F3 (M1) — C2PA via the external `c2patool` binary, owner-approved §3 deviation
+# (the `c2pa-python` 0.32.6 binding cannot produce a verifiable claim signature
+# for an offline self-signed signer; see CODING_STANDARDS §3). Install the
+# binary separately, e.g. `brew install c2patool`. `cryptography` mints the
+# self-signed ES256 test cert in `scripts/gen_test_cert.py`.
+provenance = ["cryptography>=42"]
+
+adk = ["google-adk>=0.1"]                          # orchestration (M6)
+cli = ["typer>=0.12", "sounddevice>=0.4", "mss>=9.0"]  # surface (M7)
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5", "black>=24", "mypy>=1.10"]
+
+[tool.setuptools.packages.find]
+include = ["deepverify_pro*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true
+
+# §7: strict on the security-critical packages
+[[tool.mypy.overrides]]
+module = [
+    "deepverify_pro.detection.*",
+    "deepverify_pro.provenance.*",
+    "deepverify_pro.authorization.*",
+    "deepverify_pro.audit.*",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = [
+    "deepverify_pro/detection",
+    "deepverify_pro/provenance",
+    "deepverify_pro/authorization",
+    "deepverify_pro/audit",
+]
