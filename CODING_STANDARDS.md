@@ -97,6 +97,17 @@ These substitutions were discussed and approved per the §3 rule ("do not substi
 - **68-point landmarks via `dlib`** (not mediapipe-468), to stay faithful to product.md §3.3's explicit "68 facial landmark points". Documented fallback: mediapipe-468 with a 68-subset mapping **only if `dlib` will not install**, disclosed in the model card as an approximation (§4.2).
 - **FastAPI deferred.** This round is CLI-only (Typer). FastAPI remains the pinned choice for the next round.
 - **C2PA via the official `c2patool` binary** (not the `c2pa-python` binding). `c2pa-python` 0.32.6 cannot produce a verifiable claim signature for an offline (no-TSA) self-signed signer — verified methodically: `from_info` no-TSA errors `Signature: empty string`; `from_callback` yields `claimSignature.mismatch` for ECDSA-raw, ECDSA-DER, and Ed25519 alike (while cert trust + data-hash bindings pass), proving a wrapper-level TBS defect, not an encoding mistake. `c2patool` is the CAI reference implementation; it signs/verifies offline self-signed correctly. Invoked locally only — no network, no TSA (honors §4.1). Still C2PA, still F3 — no product-scope change.
+- **M7 — frontend demo surface reintroduced (owner-approved 2026-05-21).** §3
+  pins the two surfaces as FastAPI + Typer CLI, and the gitignored `src/` React
+  bundle was previously parked as out-of-scope. M7 reintroduces it via this
+  discussed milestone as a **localhost demo UI only** — a real
+  `getDisplayMedia()` → `/detect` flow over the M6 API that exercises the F2
+  video pipeline with an honest probabilistic indicator (it replaces a
+  fabricated mock-up — an ACM 1.3 fix). It stays **gitignored**: a demo, not a
+  shipped F1–F5 surface — the Python prototype remains the version-controlled
+  product. It adds no product capability — a thin client over the existing
+  `/detect` endpoint. ACM 1.6 holds: sampled frames are POSTed only to the
+  localhost backend and are never stored.
 
 ---
 
