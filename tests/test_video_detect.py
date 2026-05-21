@@ -33,9 +33,27 @@ from deepverify_pro.indicator import IndicatorState
 from deepverify_pro.tools.video_detect import EVENT_NAME, video_detect
 
 _PREDICTOR_PATH = get_settings().dlib_landmarks_path
+
+
+def _dlib_available() -> bool:
+    """True iff the optional ``dlib`` package (the ``video`` extra) is importable."""
+    try:
+        import dlib  # noqa: F401  (importability probe only)
+    except ImportError:
+        return False
+    return True
+
+
+# The real-dlib paths need *both* the predictor weights and the dlib package.
+# Skip — never fail — when either is absent, so an audio-only checkout (no
+# `video` extra installed) still runs the suite green.
 _NEEDS_PREDICTOR = pytest.mark.skipif(
-    not _PREDICTOR_PATH.exists(),
-    reason=f"68-landmark predictor not at {_PREDICTOR_PATH}; run scripts/fetch_landmarks.py",
+    not _PREDICTOR_PATH.exists() or not _dlib_available(),
+    reason=(
+        f"real-dlib path needs the 68-landmark predictor at {_PREDICTOR_PATH} "
+        "(run scripts/fetch_landmarks.py) and the dlib package "
+        "(pip install -e '.[video]')"
+    ),
 )
 
 
