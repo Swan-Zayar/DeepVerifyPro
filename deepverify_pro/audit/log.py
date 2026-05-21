@@ -16,6 +16,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,6 +82,17 @@ class AuditLog:
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # In-process append serialisation. The M5 orchestrator runs the
+        # audio/video/provenance/financial pipelines concurrently and they
+        # all append here; without this lock, two threads could read the
+        # same prev_hash and write a forked chain (§4.4 / ACM 3.1, 3.7).
+        self._append_lock: threading.Lock = threading.Lock()
+        # Cached tail of the chain — (next seq, last record's hash). Without
+        # it every append re-parsed the whole JSONL file to recompute
+        # seq/prev_hash: O(n) per append, O(n²) over a session of concurrent
+        # per-tick appends. Populated lazily from disk on the first append,
+        # then advanced in memory under ``_append_lock``.
+        self._tail: tuple[int, str] | None = None
 
     @property
     def path(self) -> Path:
@@ -96,16 +108,23 @@ class AuditLog:
     def append(self, event: str, payload: dict[str, Any]) -> AuditRecord:
         """Append one event. Raises :class:`AuditViolation` for media-bearing payloads."""
         self._reject_forbidden(payload)
-        records = self.read_all()
-        seq = len(records)
-        prev_hash = records[-1].hash if records else GENESIS
-        ts = datetime.now(UTC).isoformat()
-        digest = _compute_hash(prev_hash, payload, ts, seq, event)
-        record = AuditRecord(
-            seq=seq, ts=ts, event=event, payload=payload, prev_hash=prev_hash, hash=digest
-        )
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(dataclasses.asdict(record), sort_keys=True) + "\n")
+        with self._append_lock:
+            if self._tail is None:
+                # First append of this instance — read the existing chain
+                # once to recover its tail. Every later append is O(1).
+                records = self.read_all()
+                seq = len(records)
+                prev_hash = records[-1].hash if records else GENESIS
+            else:
+                seq, prev_hash = self._tail
+            ts = datetime.now(UTC).isoformat()
+            digest = _compute_hash(prev_hash, payload, ts, seq, event)
+            record = AuditRecord(
+                seq=seq, ts=ts, event=event, payload=payload, prev_hash=prev_hash, hash=digest
+            )
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(dataclasses.asdict(record), sort_keys=True) + "\n")
+            self._tail = (seq + 1, digest)
         return record
 
     def read_all(self) -> list[AuditRecord]:

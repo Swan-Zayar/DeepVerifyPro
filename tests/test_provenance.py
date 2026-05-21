@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from deepverify_pro.agents import DeepVerifyOrchestrator
 from deepverify_pro.audit.log import AuditLog
 from deepverify_pro.provenance import SignResult, sign, verify
 from deepverify_pro.tools.provenance_verify import provenance_verify
@@ -156,3 +157,26 @@ def test_tools_emit_clean_audit_events(
     for record in records:
         for forbidden in ("data", "frame", "mfcc", "audio", "video"):
             assert forbidden not in record.payload
+
+
+def test_orchestrator_sign_routes_f3_through_shared_audit_chain(
+    tiny_png: Path,
+    signing_chain: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    """M5: ``orchestrator.sign()`` routes F3 signing into the shared F5 chain.
+
+    Verifies the orchestrator docstring claim — Part A signing is recorded in
+    the same hash chain as the detection-side events (CODING_STANDARDS §4.4).
+    """
+    cert, key = signing_chain
+    out = tmp_path / "signed.png"
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    orchestrator = DeepVerifyOrchestrator(audit=audit)
+    assert orchestrator.audit is audit
+
+    orchestrator.sign(tiny_png, out, cert_path=cert, key_path=key)
+
+    assert verify(out).has_valid_signature is True
+    assert [r.event for r in audit.read_all()] == ["provenance.sign"]
+    assert audit.verify_chain() is True
