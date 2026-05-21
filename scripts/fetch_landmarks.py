@@ -33,11 +33,25 @@ CANONICAL_URL: Final[str] = "https://dlib.net/files/shape_predictor_68_face_land
 # mismatch aborts (CODING_STANDARDS §7 — fail loudly).
 EXPECTED_SHA256: Final[str] = "fbdc2cb80eb9aa7a758672cbfdda32ba6300efe9b6e6c7a299ff7e736b11b92f"
 DEFAULT_DEST: Final[Path] = Path("models/shape_predictor_68_face_landmarks.dat")
+# Bounds the download so a stalled network fails loudly instead of hanging
+# forever (CODING_STANDARDS §7 — fail loudly, never silently).
+DOWNLOAD_TIMEOUT_SECONDS: Final[int] = 30
 
 
 def _download(url: str) -> bytes:
-    with urllib.request.urlopen(url) as response:  # noqa: S310 — fixed, audited URL
-        return bytes(response.read())
+    try:
+        with urllib.request.urlopen(  # noqa: S310 — fixed, audited URL
+            url, timeout=DOWNLOAD_TIMEOUT_SECONDS
+        ) as response:
+            return bytes(response.read())
+    except OSError as exc:
+        # URLError, TimeoutError and lower-level socket errors all subclass
+        # OSError — turn any of them into a clear, bounded failure.
+        raise SystemExit(
+            f"Failed to download the predictor from {url} "
+            f"(timeout {DOWNLOAD_TIMEOUT_SECONDS}s): {exc}\n"
+            "Check network connectivity and the URL, then retry."
+        ) from exc
 
 
 def _sha256(data: bytes) -> str:
