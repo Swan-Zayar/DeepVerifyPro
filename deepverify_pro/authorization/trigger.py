@@ -199,9 +199,19 @@ def build_challenge(
     *,
     recipient: str,
 ) -> OutOfBandChallenge:
-    """Mint an :class:`OutOfBandChallenge` from a fired trigger result."""
+    """Mint an :class:`OutOfBandChallenge` from a fired trigger result.
+
+    Raises :class:`ValueError` for a non-triggered ``result`` or an empty
+    ``recipient`` — an out-of-band challenge dispatched to no recipient would
+    silently defeat the defence-in-depth check (ACM 1.2).
+    """
     if not result.triggered:
         raise ValueError("cannot build a challenge from a non-triggered result")
+    if not recipient.strip():
+        raise ValueError(
+            "recipient must be non-empty — an out-of-band challenge dispatched "
+            "to no recipient silently defeats the defence-in-depth check (ACM 1.2)"
+        )
     return OutOfBandChallenge(
         challenge_id=str(uuid.uuid4()),
         recipient=recipient,

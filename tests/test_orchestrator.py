@@ -57,6 +57,16 @@ class StubVideoDetector(Detector):
         return self._result(0.45, source="stub")
 
 
+class ExplodingAudioDetector(Detector):
+    """Always raises — proves a crashed pipeline still closes the audit chain."""
+
+    name: str = "exploding-audio"
+    is_production: bool = False
+
+    def score(self, frame: Frame) -> DetectionResult:
+        raise RuntimeError("detector boom")
+
+
 def _audio_frame() -> Frame:
     return Frame(
         modality=Modality.AUDIO,
@@ -185,6 +195,52 @@ def test_tick_with_no_inputs_still_audits_lifecycle(tmp_path: Path) -> None:
     assert tick.provenance is None and tick.financial is None
     events = [r.event for r in audit.read_all()]
     assert events == [TICK_START_EVENT, TICK_END_EVENT]
+    assert audit.verify_chain() is True
+
+
+def test_tick_rejects_empty_recipient_for_a_triggering_transcript(tmp_path: Path) -> None:
+    """A fired F4 trigger must not dispatch a challenge to an empty recipient.
+
+    §4.3 / ACM 1.2: a defence-in-depth challenge that reaches no one is worse
+    than no challenge. ``build_challenge`` refuses it; the orchestrator records
+    the failure in the F5 chain and re-raises rather than swallowing it.
+    """
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    orchestrator = DeepVerifyOrchestrator(
+        audit=audit,
+        channel=RecordingChannel(),
+        financial_threshold=THRESHOLD,
+    )
+    with pytest.raises(ValueError, match="recipient"):
+        orchestrator.tick(transcript="please wire transfer $50,000", recipient="")
+
+    # The failure is audited, not swallowed — the chain opens and closes.
+    records = audit.read_all()
+    assert [r.event for r in records] == [TICK_START_EVENT, TICK_END_EVENT]
+    assert "recipient" in records[-1].payload["error"]
+    assert audit.verify_chain() is True
+
+
+def test_tick_writes_end_event_even_when_a_pipeline_raises(tmp_path: Path) -> None:
+    """A crashing pipeline must still leave a closed, orphan-free audit chain.
+
+    §4.4 / ACM 3.1, 3.7: ``orchestrator.tick.end`` is written (with an
+    ``error`` field) before the exception propagates, so the F5 chain never
+    keeps a start record with no matching end.
+    """
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    orchestrator = DeepVerifyOrchestrator(audit=audit, audio_detector=ExplodingAudioDetector())
+
+    with pytest.raises(RuntimeError, match="detector boom"):
+        orchestrator.tick(audio_frame=_audio_frame())
+
+    records = audit.read_all()
+    events = [r.event for r in records]
+    assert events[0] == TICK_START_EVENT
+    assert events[-1] == TICK_END_EVENT  # end written despite the failure
+    end_payload = records[-1].payload
+    assert end_payload["error"] is not None
+    assert "detector boom" in end_payload["error"]
     assert audit.verify_chain() is True
 
 

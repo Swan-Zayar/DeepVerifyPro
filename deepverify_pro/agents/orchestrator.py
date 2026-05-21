@@ -157,6 +157,12 @@ class DeepVerifyOrchestrator:
         thread pool. The financial trigger consults no detector score
         (§4.3 / ACM 1.2). Any pipeline without inputs is skipped — the audit
         log faithfully reflects what ran (§4.2).
+
+        If any pipeline raises — including the F4 trigger refusing to build a
+        challenge for an empty ``recipient`` (§4.3 / ACM 1.2) — the
+        ``orchestrator.tick.end`` event is still written (with an ``error``
+        field) before the exception propagates, so the F5 chain never keeps
+        an orphaned start record (§4.4 / ACM 3.1, 3.7).
         """
         self._tick_counter += 1
         tick_id = self._tick_counter
@@ -172,70 +178,95 @@ class DeepVerifyOrchestrator:
             },
         )
 
-        with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
-            audio_future: Future[DetectionResult] | None = None
-            video_future: Future[DetectionResult] | None = None
-            provenance_future: Future[ProvenanceResult] | None = None
-            financial_future: Future[FinancialTriggerOutcome] | None = None
+        audio_result: DetectionResult | None = None
+        video_result: DetectionResult | None = None
+        provenance_result: ProvenanceResult | None = None
+        financial_result: FinancialTriggerOutcome | None = None
+        error: str | None = None
 
-            if audio_frame is not None and self._audio_detector is not None:
-                audio_future = pool.submit(
-                    audio_detect,
-                    audio_frame,
-                    detector=self._audio_detector,
-                    audit=self._audit,
-                )
-            if video_frame is not None and self._video_detector is not None:
-                video_future = pool.submit(
-                    video_detect,
-                    video_frame,
-                    detector=self._video_detector,
-                    audit=self._audit,
-                )
-            if provenance_path is not None:
-                provenance_future = pool.submit(
-                    provenance_verify,
-                    provenance_path,
-                    audit=self._audit,
-                )
-            # F4 is dispatched independently of any detector future — §4.3 /
-            # ACM 1.2. It consults no detector score and no detector handle.
-            if transcript is not None and self._channel is not None:
-                financial_future = pool.submit(
-                    financial_trigger,
-                    transcript,
-                    threshold=self._financial_threshold,
-                    recipient=recipient,
-                    channel=self._channel,
-                    audit=self._audit,
-                )
+        try:
+            with ThreadPoolExecutor(max_workers=self._max_workers) as pool:
+                audio_future: Future[DetectionResult] | None = None
+                video_future: Future[DetectionResult] | None = None
+                provenance_future: Future[ProvenanceResult] | None = None
+                financial_future: Future[FinancialTriggerOutcome] | None = None
 
-            audio_result = audio_future.result() if audio_future is not None else None
-            video_result = video_future.result() if video_future is not None else None
-            provenance_result = (
-                provenance_future.result() if provenance_future is not None else None
+                if audio_frame is not None and self._audio_detector is not None:
+                    audio_future = pool.submit(
+                        audio_detect,
+                        audio_frame,
+                        detector=self._audio_detector,
+                        audit=self._audit,
+                    )
+                if video_frame is not None and self._video_detector is not None:
+                    video_future = pool.submit(
+                        video_detect,
+                        video_frame,
+                        detector=self._video_detector,
+                        audit=self._audit,
+                    )
+                if provenance_path is not None:
+                    provenance_future = pool.submit(
+                        provenance_verify,
+                        provenance_path,
+                        audit=self._audit,
+                    )
+                # F4 is dispatched independently of any detector future —
+                # §4.3 / ACM 1.2. It consults no detector score and no
+                # detector handle. An empty ``recipient`` on a fired trigger
+                # is refused inside ``build_challenge`` (caught below).
+                if transcript is not None and self._channel is not None:
+                    financial_future = pool.submit(
+                        financial_trigger,
+                        transcript,
+                        threshold=self._financial_threshold,
+                        recipient=recipient,
+                        channel=self._channel,
+                        audit=self._audit,
+                    )
+
+                audio_result = audio_future.result() if audio_future is not None else None
+                video_result = video_future.result() if video_future is not None else None
+                provenance_result = (
+                    provenance_future.result() if provenance_future is not None else None
+                )
+                financial_result = (
+                    financial_future.result() if financial_future is not None else None
+                )
+        except Exception as exc:
+            # Record the failure in the F5 chain (the finally below) and then
+            # re-raise — a swallowed pipeline failure is a security failure
+            # here (§7: never silently swallow a detection failure).
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            # Always close the tick in the audit chain, success or failure,
+            # so a crashed pipeline never leaves an orphaned start record
+            # (§4.4 / ACM 3.1, 3.7).
+            self._audit.append(
+                TICK_END_EVENT,
+                {
+                    "tick_id": tick_id,
+                    "orchestrator": self.name,
+                    "error": error,
+                    "audio_state": (
+                        str(audio_result.indicator_state) if audio_result is not None else None
+                    ),
+                    "video_state": (
+                        str(video_result.indicator_state) if video_result is not None else None
+                    ),
+                    "provenance_valid": (
+                        provenance_result.has_valid_signature
+                        if provenance_result is not None
+                        else None
+                    ),
+                    "financial_triggered": (
+                        financial_result.result.triggered
+                        if financial_result is not None
+                        else None
+                    ),
+                },
             )
-            financial_result = financial_future.result() if financial_future is not None else None
-
-        self._audit.append(
-            TICK_END_EVENT,
-            {
-                "tick_id": tick_id,
-                "orchestrator": self.name,
-                "audio_state": (
-                    str(audio_result.indicator_state) if audio_result is not None else None
-                ),
-                "video_state": (
-                    str(video_result.indicator_state) if video_result is not None else None
-                ),
-                "provenance_valid": (
-                    provenance_result.has_valid_signature if provenance_result is not None else None
-                ),
-                "financial_triggered": (
-                    financial_result.result.triggered if financial_result is not None else None
-                ),
-            },
-        )
 
         return OrchestratorTick(
             tick_id=tick_id,

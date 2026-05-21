@@ -112,6 +112,14 @@ def test_build_challenge_refuses_non_triggered_result() -> None:
         build_challenge(result, recipient="alice@example.test")
 
 
+def test_build_challenge_refuses_empty_recipient() -> None:
+    """A challenge dispatched to no recipient silently defeats F4 — refuse it (ACM 1.2)."""
+    result = evaluate_transcript("wire transfer of $50,000", threshold=THRESHOLD)
+    assert result.triggered is True
+    with pytest.raises(ValueError, match="recipient"):
+        build_challenge(result, recipient="   ")
+
+
 # ---------- channels ----------
 
 
