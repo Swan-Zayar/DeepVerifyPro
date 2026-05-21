@@ -56,8 +56,11 @@ _KEYWORD_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     for category, phrases in _KEYWORDS.items()
 }
 
-# Currency amount pattern. Matches "$10,000", "USD 50000.50", "10 million USD",
-# "£10k" (when prefixed by $/USD/GBP/EUR). Conservative — number must be tagged.
+# Currency amount pattern. The currency tag must come BEFORE the number —
+# either a symbol ("$10,000", "£10k", "$2 million") or a leading currency code
+# ("USD 75,000", "AUD 1,500"). Conservative: a trailing code ("10 million USD")
+# and untagged numbers are not matched. Note large amounts must be
+# group-separated ("100,000") — a bare "100000" is only partially captured.
 _AMOUNT_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"""
     (?:
