@@ -45,6 +45,17 @@ _KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 
+# Each category is matched on word boundaries (\b) so a keyword can never fire
+# inside a larger word — e.g. "wire transfer" must NOT match "firewire
+# transfers" (the phrase is a substring of it across the word break).
+# Substring matching would manufacture nonsensical triggers; word boundaries
+# keep F4 to real financial phrases (ACM 2.5: the false-positive cost is a
+# named residual risk).
+_KEYWORD_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
+    category: re.compile(r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")\b")
+    for category, phrases in _KEYWORDS.items()
+}
+
 # Currency amount pattern. Matches "$10,000", "USD 50000.50", "10 million USD",
 # "£10k" (when prefixed by $/USD/GBP/EUR). Conservative — number must be tagged.
 _AMOUNT_PATTERN: Final[re.Pattern[str]] = re.compile(
@@ -140,11 +151,11 @@ def _normalise_amount(match: re.Match[str]) -> float | None:
 
 
 def _find_keyword_categories(transcript_lower: str) -> tuple[str, ...]:
-    matched: list[str] = []
-    for category, phrases in _KEYWORDS.items():
-        if any(phrase in transcript_lower for phrase in phrases):
-            matched.append(category)
-    return tuple(matched)
+    return tuple(
+        category
+        for category, pattern in _KEYWORD_PATTERNS.items()
+        if pattern.search(transcript_lower) is not None
+    )
 
 
 def _find_largest_amount(transcript: str) -> float | None:

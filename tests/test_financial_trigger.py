@@ -41,6 +41,22 @@ def test_wire_transfer_keyword_fires() -> None:
     assert "wire_transfer" in result.matched_categories
 
 
+def test_keyword_uses_word_boundaries_not_substring() -> None:
+    """A keyword must not fire when it only appears inside a larger word.
+
+    Substring matching would (wrongly) fire ``wire_transfer`` on "firewire
+    transfers" — "wire transfer" is a substring of it across the word break.
+    Word-boundary matching keeps F4 to real financial language
+    (ACM 2.5: avoid manufactured false positives).
+    """
+    spurious = evaluate_transcript("the firewire transfers data fast", threshold=THRESHOLD)
+    assert spurious.matched_categories == ()
+    assert spurious.triggered is False
+
+    genuine = evaluate_transcript("please action the wire transfer", threshold=THRESHOLD)
+    assert "wire_transfer" in genuine.matched_categories
+
+
 def test_account_number_keyword_fires() -> None:
     result = evaluate_transcript("the IBAN is GB29NWBK60161331926819", threshold=THRESHOLD)
     assert result.triggered is True
