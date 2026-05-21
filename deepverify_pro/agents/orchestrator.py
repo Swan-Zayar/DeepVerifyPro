@@ -37,7 +37,7 @@ from google.adk.tools import FunctionTool
 from deepverify_pro.audit.log import AuditLog
 from deepverify_pro.authorization.trigger import OutOfBandChannel
 from deepverify_pro.detection.base import DetectionResult, Detector, Frame
-from deepverify_pro.provenance import ProvenanceResult
+from deepverify_pro.provenance import ProvenanceResult, SignResult
 from deepverify_pro.tools.audio_detect import audio_detect
 from deepverify_pro.tools.audit_log import audit_log
 from deepverify_pro.tools.financial_trigger import (
@@ -128,19 +128,28 @@ class DeepVerifyOrchestrator:
         *,
         cert_path: Path,
         key_path: Path,
-    ) -> None:
+    ) -> SignResult:
         """Part A — sign one media file via the F3 ``sign_media`` tool.
 
         Routed through the orchestrator so the audit log records every sign
         action in the same hash chain as the detection-side events (§4.4).
+        Returns the :class:`SignResult` (output path + issuer common name).
         """
-        sign_media(
+        return sign_media(
             input_path,
             output_path,
             cert_path=cert_path,
             key_path=key_path,
             audit=self._audit,
         )
+
+    def verify(self, input_path: Path) -> ProvenanceResult:
+        """Part B (one-shot) — verify one media file's C2PA manifest via F3.
+
+        Mirrors :meth:`sign`: routed through the orchestrator so the verdict
+        lands in the same F5 hash chain as the detection-side events (§4.4).
+        """
+        return provenance_verify(input_path, audit=self._audit)
 
     def tick(
         self,
@@ -261,9 +270,7 @@ class DeepVerifyOrchestrator:
                         else None
                     ),
                     "financial_triggered": (
-                        financial_result.result.triggered
-                        if financial_result is not None
-                        else None
+                        financial_result.result.triggered if financial_result is not None else None
                     ),
                 },
             )
