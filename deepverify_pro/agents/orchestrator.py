@@ -27,6 +27,7 @@ concurrent pipelines can all append to a single F5 chain (§4.4).
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +38,7 @@ from google.adk.tools import FunctionTool
 from deepverify_pro.audit.log import AuditLog
 from deepverify_pro.authorization.trigger import OutOfBandChannel
 from deepverify_pro.detection.base import DetectionResult, Detector, Frame
-from deepverify_pro.provenance import ProvenanceResult
+from deepverify_pro.provenance import ProvenanceResult, SignResult
 from deepverify_pro.tools.audio_detect import audio_detect
 from deepverify_pro.tools.audit_log import audit_log
 from deepverify_pro.tools.financial_trigger import (
@@ -95,6 +96,10 @@ class DeepVerifyOrchestrator:
         self._financial_threshold: float = financial_threshold
         self._max_workers: int = max_workers
         self._tick_counter: int = 0
+        # ``tick`` may run concurrently — FastAPI dispatches sync endpoints on a
+        # threadpool — so the tick-id read-modify-write is guarded; without the
+        # lock two ticks could collide and emit duplicate/out-of-order IDs.
+        self._tick_lock: threading.Lock = threading.Lock()
 
         # The six-tool ADK surface (CODING_STANDARDS §2). Registered once so
         # the function metadata is captured for any future ADK runner; the
@@ -128,19 +133,28 @@ class DeepVerifyOrchestrator:
         *,
         cert_path: Path,
         key_path: Path,
-    ) -> None:
+    ) -> SignResult:
         """Part A — sign one media file via the F3 ``sign_media`` tool.
 
         Routed through the orchestrator so the audit log records every sign
         action in the same hash chain as the detection-side events (§4.4).
+        Returns the :class:`SignResult` (output path + issuer common name).
         """
-        sign_media(
+        return sign_media(
             input_path,
             output_path,
             cert_path=cert_path,
             key_path=key_path,
             audit=self._audit,
         )
+
+    def verify(self, input_path: Path) -> ProvenanceResult:
+        """Part B (one-shot) — verify one media file's C2PA manifest via F3.
+
+        Mirrors :meth:`sign`: routed through the orchestrator so the verdict
+        lands in the same F5 hash chain as the detection-side events (§4.4).
+        """
+        return provenance_verify(input_path, audit=self._audit)
 
     def tick(
         self,
@@ -164,8 +178,9 @@ class DeepVerifyOrchestrator:
         field) before the exception propagates, so the F5 chain never keeps
         an orphaned start record (§4.4 / ACM 3.1, 3.7).
         """
-        self._tick_counter += 1
-        tick_id = self._tick_counter
+        with self._tick_lock:
+            self._tick_counter += 1
+            tick_id = self._tick_counter
         self._audit.append(
             TICK_START_EVENT,
             {
@@ -261,9 +276,7 @@ class DeepVerifyOrchestrator:
                         else None
                     ),
                     "financial_triggered": (
-                        financial_result.result.triggered
-                        if financial_result is not None
-                        else None
+                        financial_result.result.triggered if financial_result is not None else None
                     ),
                 },
             )

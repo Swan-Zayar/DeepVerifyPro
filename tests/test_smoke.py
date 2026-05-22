@@ -18,9 +18,9 @@ def test_all_packages_import() -> None:
     for mod in (
         "deepverify_pro",
         "deepverify_pro.agents",
+        "deepverify_pro.api",
         "deepverify_pro.audit",
         "deepverify_pro.authorization",
-        "deepverify_pro.cli",
         "deepverify_pro.config",
         "deepverify_pro.detection",
         "deepverify_pro.detection.audio",

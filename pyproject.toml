@@ -25,8 +25,17 @@ video = ["opencv-python>=4.9", "dlib>=20"]         # F2 (M3) — dlib 68-landmar
 # self-signed ES256 test cert in `scripts/gen_test_cert.py`.
 provenance = ["cryptography>=42"]
 
-adk = ["google-adk>=0.1"]                          # orchestration (M6)
-cli = ["typer>=0.12", "sounddevice>=0.4", "mss>=9.0"]  # surface (M7)
+adk = ["google-adk>=0.1"]                          # orchestration (M5)
+# M6 HTTP surface — localhost FastAPI over the F1–F5 orchestrator. Pulls in the
+# audio + video + provenance + adk extras: the API package imports google-adk
+# (via the orchestrator), librosa/soundfile (audio decode) and opencv-python
+# (image decode), so installing `.[api]` alone would fail at import.
+api = [
+    "deepverify-pro[audio,video,provenance,adk]",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "python-multipart>=0.0.9",
+]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5", "black>=24", "mypy>=1.10"]
 
 [tool.setuptools.packages.find]
