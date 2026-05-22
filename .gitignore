@@ -23,10 +23,12 @@ var/
 # scripts/fetch_landmarks.py, never committed.
 models/
 
-# Out-of-scope Figma frontend bundle — not part of the Python prototype
-# (CODING_STANDARDS §0 Scope Lock; FastAPI deferred, CLI-only this round).
-# Files stay on disk; remove these lines and re-add if frontend work is
-# reintroduced via a discussed milestone.
+# Figma frontend bundle — reintroduced as the M7 local demo surface
+# (owner-approved 2026-05-21; see CODING_STANDARDS §3 deviations). Kept
+# gitignored on purpose: it is a localhost demo UI over the M6 API, not a
+# shipped F1-F5 surface. The Python prototype remains the version-controlled
+# product. DeepfakeDetectionDemo.tsx (getDisplayMedia -> /detect) and
+# CryptoSignatureDemo.tsx (/sign + /verify) are the M7 real-backend demo flows.
 ATTRIBUTIONS.md
 BORDER_BEAM_INTEGRATION.md
 INTEGRATION_SUMMARY.md
@@ -40,3 +42,8 @@ tsconfig.node.json
 vite.config.ts
 src/
 guidelines/
+# M7 demo build/dependency artifacts — package.json is itself gitignored above,
+# so the lockfile and installed/built output stay local too.
+node_modules/
+dist/
+pnpm-lock.yaml
