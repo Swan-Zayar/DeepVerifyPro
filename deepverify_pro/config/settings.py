@@ -41,7 +41,9 @@ class Settings(BaseSettings):
     # endpoints must not be exposed on a public interface in the prototype.
     api_host: str = Field(default="127.0.0.1")
     api_port: int = Field(default=8000, ge=1, le=65535)
-    api_cors_origins: list[str] = Field(default=["http://localhost:5173", "http://127.0.0.1:5173"])
+    api_cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
+    )
 
 
 def get_settings() -> Settings:
