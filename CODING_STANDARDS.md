@@ -122,9 +122,10 @@ These substitutions were discussed and approved per the §3 rule ("do not substi
   prototype-accurate content (§4.2 / ACM 1.3). Still a thin client — no new
   endpoint, no product capability; `src/` stays gitignored and localhost-only
   (ACM 1.6). Signing uses the local self-signed prototype certificate, surfaced
-  to the user as untrusted (ACM 2.5). Not yet addressed: `CTASection.tsx` still
-  carries fabricated commercial claims ("free trial", "Contact Sales") — a
-  separate ACM 1.3 cleanup left for owner discussion.
+  to the user as untrusted (ACM 2.5). `CTASection.tsx`'s fabricated commercial
+  claims (free-trial offer, "Contact Sales", "no credit card required") were
+  also removed and replaced with honest prototype CTAs (owner-approved
+  2026-05-23) — the landing copy now makes no claim the prototype cannot back.
 
 ---
 
