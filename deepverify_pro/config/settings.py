@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # F2 — path to the dlib 68-point predictor (fetch via
     # ``scripts/fetch_landmarks.py``; weights are never committed, ACM 1.6).
     dlib_landmarks_path: Path = Field(default=Path("models/shape_predictor_68_face_landmarks.dat"))
+    # F2 (M8) — EfficientNet-B4 / Self-Blended-Images checkpoint. Research-only
+    # weights (M8 §7); install via scripts/fetch_sbi_weights.py. Never committed
+    # (models/ is gitignored, ACM 1.6).
+    sbi_weights_path: Path = Field(default=Path("models/sbi_efficientnet_b4.pth"))
     # F4 — out-of-band challenge log written by the on-prem file channel
     # (``var/`` is gitignored; challenges never leave the machine, ACM 1.6).
     challenge_log_path: Path = Field(default=Path("var/challenges.jsonl"))

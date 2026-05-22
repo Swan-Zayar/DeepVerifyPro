@@ -29,6 +29,11 @@ adk = ["google-adk>=0.1"]                          # orchestration (M5)
 # M6 HTTP surface — localhost FastAPI over the F1–F5 orchestrator. Builds on
 # the audio + video + provenance + adk extras for the live detection tools.
 api = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.9"]
+# F2 (M8) — EfficientNet-B4 / Self-Blended-Images trained detector. The SBI
+# checkpoint requires `efficientnet_pytorch` (not `timm` — incompatible
+# state-dict keys; see CODING_STANDARDS §3 M8 entry). Research-only weights
+# (M8 §7). Install with the video extra: `pip install -e '.[video,video-model]'`.
+video-model = ["torch>=2.2", "efficientnet-pytorch>=0.7"]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.5", "black>=24", "mypy>=1.10"]
 
 [tool.setuptools.packages.find]
