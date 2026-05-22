@@ -52,30 +52,47 @@ from deepverify_pro.audit.log import AuditLog, AuditTampered
 from deepverify_pro.authorization import LocalFileChannel
 from deepverify_pro.config import Settings, get_settings
 from deepverify_pro.detection.audio import BaselineAudioDetector
-from deepverify_pro.detection.base import DetectionResult
+from deepverify_pro.detection.base import DetectionResult, Detector
 from deepverify_pro.detection.video.baseline import BaselineVideoDetector
+from deepverify_pro.detection.video.efficientnet_sbi import EfficientNetSBIDetector
 from deepverify_pro.provenance import ProvenanceSignerError, ProvenanceVerifierError
 from deepverify_pro.provenance.verifier import C2PATOOL_BIN
+
+
+def _select_video_detector(settings: Settings) -> Detector | None:
+    """Pick the F2 video detector for the live ``/detect`` path.
+
+    Prefers the M8 trained model — :class:`EfficientNetSBIDetector` — whenever
+    its checkpoint is on disk, so the live path runs the real EfficientNet-B4 /
+    Self-Blended-Images network rather than the geometric baseline. Falls back
+    to the 68-landmark :class:`BaselineVideoDetector` when only the dlib
+    predictor is present, and to ``None`` (the orchestrator simply skips the
+    video pipeline) when neither weight file exists.
+
+    Both detectors keep ``is_production = False`` and the API echoes that flag,
+    so a prototype score is never surfaced as a verdict (ACM 1.3 / 2.5). Weights
+    load from local files only — no runtime network, no media egress (ACM 1.6).
+    """
+    if settings.sbi_weights_path.is_file():
+        return EfficientNetSBIDetector(settings.sbi_weights_path)
+    if settings.dlib_landmarks_path.is_file():
+        return BaselineVideoDetector(settings.dlib_landmarks_path)
+    return None
 
 
 def build_default_orchestrator(settings: Settings) -> DeepVerifyOrchestrator:
     """Construct the orchestrator the API serves from, wired to live tools.
 
-    The video detector is wired only when the dlib 68-point predictor is
-    present on disk; otherwise the orchestrator simply skips the video
-    pipeline (it tolerates ``video_detector=None``). The audit log and the F4
-    challenge channel are local files on the deploying machine (ACM 1.6).
+    The video pipeline uses the trained EfficientNet-B4 / SBI detector when its
+    checkpoint is installed, falling back to the landmark baseline and then to
+    no video pipeline — see :func:`_select_video_detector`. The audit log and
+    the F4 challenge channel are local files on the deploying machine (ACM 1.6).
     """
     audit = AuditLog(settings.audit_path)
-    video_detector = (
-        BaselineVideoDetector(settings.dlib_landmarks_path)
-        if settings.dlib_landmarks_path.is_file()
-        else None
-    )
     return DeepVerifyOrchestrator(
         audit=audit,
         audio_detector=BaselineAudioDetector(),
-        video_detector=video_detector,
+        video_detector=_select_video_detector(settings),
         channel=LocalFileChannel(settings.challenge_log_path),
         financial_threshold=settings.financial_amount_threshold,
     )
