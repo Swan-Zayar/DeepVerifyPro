@@ -108,6 +108,23 @@ These substitutions were discussed and approved per the §3 rule ("do not substi
   product. It adds no product capability — a thin client over the existing
   `/detect` endpoint. ACM 1.6 holds: sampled frames are POSTed only to the
   localhost backend and are never stored.
+- **M7 extension — sign/verify demo + fabricated-copy fixes (owner-approved
+  2026-05-23).** The M7 demo surface gains a real C2PA **sign + verify** flow
+  (`CryptoSignatureDemo.tsx`) over the existing M6 `/sign` and `/verify`
+  endpoints — replacing a fabricated mock-up (hardcoded fake signature hashes,
+  an auto-cycling "Verified" badge, "military-grade encryption" copy: an ACM
+  1.3 violation, the same class M7 fixed for the video demo). The signed asset
+  is re-POSTed to `/verify` so the panel shows the backend's own verification,
+  never a self-asserted badge. At the same time the fabricated landing-page
+  metrics (`StatsSection` — "99.8% accuracy", "<100ms", "10M+ files") and the
+  absolute-guarantee / hype copy (`VisualShowcase` — "military-grade", "detect
+  deepfakes instantly", "ensuring … is authentic") were replaced with honest,
+  prototype-accurate content (§4.2 / ACM 1.3). Still a thin client — no new
+  endpoint, no product capability; `src/` stays gitignored and localhost-only
+  (ACM 1.6). Signing uses the local self-signed prototype certificate, surfaced
+  to the user as untrusted (ACM 2.5). Not yet addressed: `CTASection.tsx` still
+  carries fabricated commercial claims ("free trial", "Contact Sales") — a
+  separate ACM 1.3 cleanup left for owner discussion.
 
 ---
 

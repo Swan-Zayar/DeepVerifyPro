@@ -27,7 +27,8 @@ models/
 # (owner-approved 2026-05-21; see CODING_STANDARDS §3 deviations). Kept
 # gitignored on purpose: it is a localhost demo UI over the M6 API, not a
 # shipped F1-F5 surface. The Python prototype remains the version-controlled
-# product. DeepfakeDetectionDemo.tsx is the M7 getDisplayMedia() -> /detect flow.
+# product. DeepfakeDetectionDemo.tsx (getDisplayMedia -> /detect) and
+# CryptoSignatureDemo.tsx (/sign + /verify) are the M7 real-backend demo flows.
 ATTRIBUTIONS.md
 BORDER_BEAM_INTEGRATION.md
 INTEGRATION_SUMMARY.md
