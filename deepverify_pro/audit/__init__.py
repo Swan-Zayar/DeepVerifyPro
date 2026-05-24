@@ -10,6 +10,13 @@ from deepverify_pro.audit.log import (
     AuditRecord,
     AuditTampered,
     AuditViolation,
+    SessionAuditLog,
 )
 
-__all__ = ["AuditLog", "AuditRecord", "AuditTampered", "AuditViolation"]
+__all__ = [
+    "AuditLog",
+    "AuditRecord",
+    "AuditTampered",
+    "AuditViolation",
+    "SessionAuditLog",
+]

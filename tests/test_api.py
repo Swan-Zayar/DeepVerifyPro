@@ -9,6 +9,7 @@ Scope: in-product.md
 from __future__ import annotations
 
 import io
+import json
 import shutil
 from pathlib import Path
 
@@ -263,6 +264,66 @@ def test_audit_records_carry_no_media_keys(tmp_path: Path) -> None:
     for record in records:
         for key in forbidden:
             assert key not in record["payload"]
+
+
+# ---------- F5 per-session audit slice (download) ----------
+
+
+def test_audit_session_endpoint_returns_only_matching_records(tmp_path: Path) -> None:
+    """The slice contains the requested session's events; other sessions and
+    untagged events stay out. Each record keeps its original seq so the
+    global chain order is preserved in the download."""
+    orchestrator = _orchestrator(tmp_path, audio_detector=BaselineAudioDetector())
+    client = _client(tmp_path, orchestrator)
+    client.post(
+        "/detect",
+        files={"audio": ("a.wav", _wav_bytes(), "audio/wav")},
+        data={"session_id": "sess-A"},
+    )
+    client.post(
+        "/detect",
+        files={"audio": ("b.wav", _wav_bytes(), "audio/wav")},
+        data={"session_id": "sess-B"},
+    )
+
+    resp = client.get("/audit/session/sess-A")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    assert resp.headers["content-disposition"] == (
+        'attachment; filename="audit-session-sess-A.jsonl"'
+    )
+    lines = [line for line in resp.text.splitlines() if line]
+    records = [json.loads(line) for line in lines]
+    assert records, "expected at least one record for sess-A"
+    for record in records:
+        assert record["payload"]["session_id"] == "sess-A"
+    # the orchestrator's global chain is still one continuous chain
+    assert orchestrator.audit.verify_chain() is True
+
+
+def test_audit_session_endpoint_rejects_invalid_session_id(tmp_path: Path) -> None:
+    """Path-component / Content-Disposition injection is refused at the boundary.
+
+    Either the route handler's regex returns 400, or Starlette's path router
+    refuses to match (404) when the decoded id contains a path separator —
+    both are valid rejections at the boundary.
+    """
+    client = _client(tmp_path, _orchestrator(tmp_path))
+    resp = client.get("/audit/session/has spaces")
+    assert resp.status_code == 400
+    resp = client.get("/audit/session/has%2Fslash")
+    assert resp.status_code in {400, 404}
+
+
+def test_detect_rejects_invalid_session_id_form_field(tmp_path: Path) -> None:
+    orchestrator = _orchestrator(tmp_path, audio_detector=BaselineAudioDetector())
+    client = _client(tmp_path, orchestrator)
+    resp = client.post(
+        "/detect",
+        files={"audio": ("a.wav", _wav_bytes(), "audio/wav")},
+        data={"session_id": "bad id"},
+    )
+    assert resp.status_code == 400
 
 
 # ---------- ACM 1.6: CORS is scoped to the local frontend origins ----------

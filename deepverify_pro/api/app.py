@@ -20,15 +20,18 @@ detector's ``is_production`` flag; a baseline is never surfaced as a verdict.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 
 from deepverify_pro.agents import DeepVerifyOrchestrator
@@ -57,6 +60,11 @@ from deepverify_pro.detection.video.baseline import BaselineVideoDetector
 from deepverify_pro.detection.video.efficientnet_sbi import EfficientNetSBIDetector
 from deepverify_pro.provenance import ProvenanceSignerError, ProvenanceVerifierError
 from deepverify_pro.provenance.verifier import C2PATOOL_BIN
+
+# Conservative whitelist for session ids used both as a form input and as a
+# filename component in the per-session download. Restricting to URL- and
+# filename-safe chars prevents Content-Disposition / path-component injection.
+_SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _select_video_detector(settings: Settings) -> Detector | None:
@@ -206,6 +214,7 @@ def create_app(
         transcript: Annotated[str | None, Form()] = None,
         recipient: Annotated[str, Form()] = "",
         frame_index: Annotated[int, Form()] = 0,
+        session_id: Annotated[str | None, Form()] = None,
     ) -> DetectResponse:
         """Part B — run one orchestrator tick over the supplied media.
 
@@ -231,12 +240,18 @@ def create_app(
                 provenance_path = _spool(provenance, _suffix(provenance))
                 cleanup.append(provenance_path)
             try:
+                if session_id is not None and not _SESSION_ID_RE.match(session_id):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="session_id must be 1-64 chars of [A-Za-z0-9_-]",
+                    )
                 tick = orch.tick(
                     audio_frame=audio_frame,
                     video_frame=video_frame,
                     provenance_path=provenance_path,
                     transcript=transcript,
                     recipient=recipient,
+                    session_id=session_id,
                 )
             except ValueError as exc:
                 # Detector / orchestrator domain errors (no face, audio too
@@ -339,6 +354,40 @@ def create_app(
             intact=True,
             records_checked=checked,
             detail="hash chain intact",
+        )
+
+    @app.get("/audit/session/{session_id}")
+    def audit_session(session_id: str) -> Response:
+        """F5 — download one session's slice of the chain as a JSONL file.
+
+        Returns the records whose payload was stamped ``session_id`` during
+        their tick, as one JSON object per line. Each record keeps its
+        original ``seq``/``prev_hash``/``hash`` so a downstream reader can
+        re-check per-record hashes; however the slice is not a self-contained
+        chain — full-chain integrity verification requires the global log
+        via :func:`audit_verify` (ACM 1.3 / 2.5 — slice ≠ chain).
+        """
+        if not _SESSION_ID_RE.match(session_id):
+            raise HTTPException(
+                status_code=400,
+                detail="session_id must be 1-64 chars of [A-Za-z0-9_-]",
+            )
+        records = orch.audit.read_session(session_id)
+        body = "".join(
+            json.dumps(dataclasses.asdict(record), sort_keys=True) + "\n" for record in records
+        )
+        headers = {
+            "Content-Disposition": (f'attachment; filename="audit-session-{session_id}.jsonl"'),
+            "X-Session-Record-Count": str(len(records)),
+            "X-Audit-Notice": (
+                "Filtered slice of the global F5 hash chain. Chain-level "
+                "integrity verification requires the full log via /audit/verify."
+            ),
+        }
+        return Response(
+            content=body,
+            media_type="application/x-ndjson",
+            headers=headers,
         )
 
     return app

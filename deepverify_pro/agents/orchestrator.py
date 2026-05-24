@@ -34,7 +34,7 @@ from typing import Final
 
 from google.adk.tools import FunctionTool
 
-from deepverify_pro.audit.log import AuditLog
+from deepverify_pro.audit.log import AuditLog, SessionAuditLog
 from deepverify_pro.authorization.trigger import OutOfBandChannel
 from deepverify_pro.detection.base import DetectionResult, Detector, Frame
 from deepverify_pro.provenance import ProvenanceResult, SignResult
@@ -159,6 +159,7 @@ class DeepVerifyOrchestrator:
         provenance_path: Path | None = None,
         transcript: str | None = None,
         recipient: str = "",
+        session_id: str | None = None,
     ) -> OrchestratorTick:
         """Part B — one coordinated cycle over the four runtime pipelines.
 
@@ -172,10 +173,19 @@ class DeepVerifyOrchestrator:
         ``orchestrator.tick.end`` event is still written (with an ``error``
         field) before the exception propagates, so the F5 chain never keeps
         an orphaned start record (§4.4 / ACM 3.1, 3.7).
+
+        When ``session_id`` is supplied, every audit append made during this
+        tick is routed through a :class:`SessionAuditLog` proxy that stamps
+        the id into the payload. The underlying global hash chain is
+        unchanged — the proxy only adds a key so the slice can later be
+        filtered for that session's user (F5 per-session download).
         """
         self._tick_counter += 1
         tick_id = self._tick_counter
-        self._audit.append(
+        tick_audit: AuditLog = (
+            SessionAuditLog(self._audit, session_id) if session_id else self._audit
+        )
+        tick_audit.append(
             TICK_START_EVENT,
             {
                 "tick_id": tick_id,
@@ -205,20 +215,20 @@ class DeepVerifyOrchestrator:
                         audio_detect,
                         audio_frame,
                         detector=self._audio_detector,
-                        audit=self._audit,
+                        audit=tick_audit,
                     )
                 if video_frame is not None and self._video_detector is not None:
                     video_future = pool.submit(
                         video_detect,
                         video_frame,
                         detector=self._video_detector,
-                        audit=self._audit,
+                        audit=tick_audit,
                     )
                 if provenance_path is not None:
                     provenance_future = pool.submit(
                         provenance_verify,
                         provenance_path,
-                        audit=self._audit,
+                        audit=tick_audit,
                     )
                 # F4 is dispatched independently of any detector future —
                 # §4.3 / ACM 1.2. It consults no detector score and no
@@ -231,7 +241,7 @@ class DeepVerifyOrchestrator:
                         threshold=self._financial_threshold,
                         recipient=recipient,
                         channel=self._channel,
-                        audit=self._audit,
+                        audit=tick_audit,
                     )
 
                 audio_result = audio_future.result() if audio_future is not None else None
@@ -252,7 +262,7 @@ class DeepVerifyOrchestrator:
             # Always close the tick in the audit chain, success or failure,
             # so a crashed pipeline never leaves an orphaned start record
             # (§4.4 / ACM 3.1, 3.7).
-            self._audit.append(
+            tick_audit.append(
                 TICK_END_EVENT,
                 {
                     "tick_id": tick_id,

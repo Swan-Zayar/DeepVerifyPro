@@ -161,3 +161,61 @@ class AuditLog:
                 raise AuditTampered(f"hash mismatch at seq {i}")
             prev = record.hash
         return True
+
+    def read_session(self, session_id: str) -> list[AuditRecord]:
+        """Return the slice of records whose payload was stamped ``session_id``.
+
+        Read-only filter over :meth:`read_all` — the global chain is not
+        forked or partitioned. Returned records keep their original
+        ``seq``/``prev_hash``/``hash`` values so per-record hashes can still
+        be re-checked individually; full-chain integrity verification must
+        run against the full log via :meth:`verify_chain` (ACM 1.3 / 2.5 —
+        slice ≠ self-contained chain).
+        """
+        if not session_id:
+            return []
+        return [r for r in self.read_all() if r.payload.get("session_id") == session_id]
+
+
+class SessionAuditLog(AuditLog):
+    """Append proxy that stamps ``session_id`` into every payload.
+
+    Feature: F5 (per-session slice of the global tamper-evident chain)
+    ACM: 3.1, 3.7, 1.6
+
+    Delegates every :meth:`append` to the wrapped :class:`AuditLog` so the
+    global F5 hash chain remains the single source of truth — no per-session
+    forking of the chain. Adds one payload key (``session_id``) so the chain
+    can later be filtered to one session via :meth:`AuditLog.read_session`.
+
+    Subclasses :class:`AuditLog` for typing compatibility (the F5 tools take
+    ``AuditLog`` — e.g. ``tools/audio_detect.py``). Reads inherit through to
+    the same JSONL file; writes delegate to the wrapped log's lock and tail
+    cache, so concurrent ticks under different proxies still serialise on
+    one chain.
+    """
+
+    def __init__(self, log: AuditLog, session_id: str) -> None:
+        if not session_id:
+            raise ValueError("session_id must be non-empty")
+        super().__init__(log.path)
+        self._wrapped: AuditLog = log
+        self._session_id: str = session_id
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    def append(self, event: str, payload: dict[str, Any]) -> AuditRecord:
+        """Stamp ``session_id`` and delegate. Refuses payloads that already
+        carry a different ``session_id`` so a tool cannot forge another
+        session's label (defence-in-depth alongside the 1.6 media-key guard).
+        """
+        existing = payload.get("session_id")
+        if existing is not None and existing != self._session_id:
+            raise AuditViolation(
+                f"payload session_id {existing!r} mismatches "
+                f"{self._session_id!r} — refusing override"
+            )
+        stamped = {**payload, "session_id": self._session_id}
+        return self._wrapped.append(event, stamped)
