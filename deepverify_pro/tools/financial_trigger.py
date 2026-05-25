@@ -56,12 +56,15 @@ def financial_trigger(
     """
     result = evaluate_transcript(transcript, threshold=threshold)
     receipt: ChallengeReceipt | None = None
+    reason_code: str | None = None
     if result.triggered:
         challenge = build_challenge(result, recipient=recipient)
+        reason_code = challenge.reason_code
         receipt = channel.send(challenge)
 
     payload: dict[str, object] = {
         "triggered": result.triggered,
+        "reason_code": reason_code,
         "matched_categories": list(result.matched_categories),
         "largest_amount": result.largest_amount,
         "amount_above_threshold": result.amount_above_threshold,

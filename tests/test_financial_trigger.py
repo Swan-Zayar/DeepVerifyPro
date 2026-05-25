@@ -120,6 +120,55 @@ def test_build_challenge_refuses_empty_recipient() -> None:
         build_challenge(result, recipient="   ")
 
 
+def test_build_challenge_picks_keyword_reason_when_categories_match() -> None:
+    """Transcript with a named category ⇒ reason_code == financial_language."""
+    result = evaluate_transcript("approve the transfer of $25,000", threshold=THRESHOLD)
+    challenge = build_challenge(result, recipient="cfo-device")
+    assert challenge.reason_code == "financial_language"
+
+
+def test_build_challenge_picks_amount_reason_when_only_amount_above_threshold() -> None:
+    """Transcript with bare amount only ⇒ reason_code == amount_threshold."""
+    result = evaluate_transcript("send $25,000 over", threshold=THRESHOLD)
+    assert result.matched_categories == ()
+    challenge = build_challenge(result, recipient="cfo-device")
+    assert challenge.reason_code == "amount_threshold"
+
+
+def test_build_challenge_respects_explicit_reason_override() -> None:
+    """Callers (F3+F4 composition) can pass an explicit provenance reason."""
+    result = evaluate_transcript("wire transfer of $50,000", threshold=THRESHOLD)
+    challenge = build_challenge(result, recipient="cfo-device", reason_code="untrusted_issuer")
+    assert challenge.reason_code == "untrusted_issuer"
+
+
+def test_financial_trigger_audit_records_reason_code(tmp_path: Path) -> None:
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    financial_trigger(
+        "wire transfer $80,000 to vendor",
+        threshold=THRESHOLD,
+        recipient="cfo-device",
+        channel=RecordingChannel(),
+        audit=audit,
+    )
+    records = audit.read_all()
+    assert len(records) == 1
+    assert records[0].payload["reason_code"] == "financial_language"
+
+
+def test_financial_trigger_audit_reason_code_is_none_when_not_triggered(tmp_path: Path) -> None:
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    financial_trigger(
+        "just chatting",
+        threshold=THRESHOLD,
+        recipient="cfo-device",
+        channel=RecordingChannel(),
+        audit=audit,
+    )
+    records = audit.read_all()
+    assert records[0].payload["reason_code"] is None
+
+
 # ---------- channels ----------
 
 
