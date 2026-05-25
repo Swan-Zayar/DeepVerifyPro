@@ -25,8 +25,10 @@ from deepverify_pro.audit.log import AuditLog
 from deepverify_pro.authorization import RecordingChannel
 from deepverify_pro.detection.base import DetectionResult, Detector, Frame, Modality
 from deepverify_pro.indicator import IndicatorState
+from deepverify_pro.provenance import ProvenanceResult
 from deepverify_pro.tools.audio_detect import EVENT_NAME as AUDIO_EVENT
 from deepverify_pro.tools.financial_trigger import EVENT_NAME as FIN_EVENT
+from deepverify_pro.tools.provenance_financial_trigger import EVENT_NAME as PROV_FIN_EVENT
 from deepverify_pro.tools.provenance_verify import EVENT_NAME as PROV_EVENT
 from deepverify_pro.tools.video_detect import EVENT_NAME as VIDEO_EVENT
 
@@ -83,8 +85,13 @@ def _video_frame() -> Frame:
 # ---------- ADK tool surface (CODING_STANDARDS §2) ----------
 
 
-def test_orchestrator_exposes_all_six_tools(tmp_path: Path) -> None:
-    """§2 requires exactly six deterministic tools on the orchestrator surface."""
+def test_orchestrator_exposes_all_seven_tools(tmp_path: Path) -> None:
+    """§2 + DEVIATIONS.md: seven deterministic tools after the F3+F4 composition.
+
+    The seventh tool — ``provenance_financial_trigger`` — is the owner-approved
+    widening of F4's trigger surface to include unsigned / untrusted financial
+    documents. Still a composition of two product.md features, not a new one.
+    """
     audit = AuditLog(tmp_path / "audit.jsonl")
     orchestrator = DeepVerifyOrchestrator(audit=audit)
     names = orchestrator.tool_names()
@@ -94,9 +101,10 @@ def test_orchestrator_exposes_all_six_tools(tmp_path: Path) -> None:
         "provenance_verify",
         "sign_media",
         "financial_trigger",
+        "provenance_financial_trigger",
         "audit_log",
     }
-    assert len(orchestrator.tools) == 6
+    assert len(orchestrator.tools) == 7
 
 
 def test_orchestrator_name_is_stable(tmp_path: Path) -> None:
@@ -312,6 +320,237 @@ def test_provenance_runs_independently_of_detectors(tmp_path: Path) -> None:
     assert tick.provenance.has_valid_signature is False  # unsigned input
     events = [r.event for r in audit.read_all()]
     assert PROV_EVENT in events
+    assert audit.verify_chain() is True
+
+
+# ---------- ACM 1.6: orchestrator audit payloads carry no media ----------
+
+
+# ---------- F3+F4 composition via verify_for_financial ----------
+
+
+def _patch_verify(monkeypatch: pytest.MonkeyPatch, result: ProvenanceResult) -> None:
+    """Replace the verifier the orchestrator imported with a stub returning ``result``.
+
+    The orchestrator binds ``provenance_verify`` at import time, so we patch
+    that name on the orchestrator module rather than the tool module. The stub
+    still writes the F3 audit event so the chain reflects what would happen
+    end-to-end without needing c2patool installed.
+    """
+
+    def fake(
+        input_path: Path,
+        *,
+        audit: AuditLog,
+        trusted_issuers: tuple[str, ...] = (),
+    ) -> ProvenanceResult:
+        audit.append(
+            PROV_EVENT,
+            {
+                "input_name": input_path.name,
+                "has_valid_signature": result.has_valid_signature,
+                "is_trusted_issuer": result.is_trusted_issuer,
+                "issuer": result.issuer,
+                "reason": result.reason,
+            },
+        )
+        return result
+
+    monkeypatch.setattr(
+        "deepverify_pro.agents.orchestrator.provenance_verify",
+        fake,
+    )
+
+
+def test_verify_for_financial_trusted_and_valid_does_not_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trusted + valid signature → no F4 challenge, both events still audited."""
+    _patch_verify(
+        monkeypatch,
+        ProvenanceResult(
+            has_valid_signature=True,
+            issuer="Acme Org Signing",
+            reason="valid C2PA manifest",
+            is_trusted_issuer=True,
+        ),
+    )
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    channel = RecordingChannel()
+    orchestrator = DeepVerifyOrchestrator(
+        audit=audit,
+        channel=channel,
+        trusted_issuers=("Acme Org Signing",),
+    )
+
+    outcome = orchestrator.verify_for_financial(tmp_path / "invoice.pdf", recipient="cfo-device")
+
+    assert outcome.provenance.has_valid_signature is True
+    assert outcome.provenance.is_trusted_issuer is True
+    assert outcome.financial.triggered is False
+    assert outcome.financial.reason_code is None
+    assert len(channel.sent) == 0
+
+    events = [r.event for r in audit.read_all()]
+    assert events == [PROV_EVENT, PROV_FIN_EVENT]
+    assert audit.verify_chain() is True
+
+
+def test_verify_for_financial_untrusted_issuer_fires_f4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid signature from an issuer not on the trust list dispatches F4.
+
+    §5 anti-pattern guard: a cryptographically valid signature alone does NOT
+    authorise a financial action. The composition catches the attacker who
+    self-signs their forgery with their own cert.
+    """
+    _patch_verify(
+        monkeypatch,
+        ProvenanceResult(
+            has_valid_signature=True,
+            issuer="Attacker Self-Signed",
+            reason="valid C2PA manifest (issuer not in deployment trust list)",
+            is_trusted_issuer=False,
+        ),
+    )
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    channel = RecordingChannel()
+    orchestrator = DeepVerifyOrchestrator(
+        audit=audit,
+        channel=channel,
+        trusted_issuers=("Acme Org Signing",),
+    )
+
+    outcome = orchestrator.verify_for_financial(tmp_path / "invoice.pdf", recipient="cfo-device")
+
+    assert outcome.provenance.has_valid_signature is True
+    assert outcome.provenance.is_trusted_issuer is False
+    assert outcome.financial.triggered is True
+    assert outcome.financial.reason_code == "untrusted_issuer"
+    assert len(channel.sent) == 1
+    assert channel.sent[0].reason_code == "untrusted_issuer"
+
+    events = [r.event for r in audit.read_all()]
+    assert events == [PROV_EVENT, PROV_FIN_EVENT]
+    assert audit.verify_chain() is True
+
+
+def test_verify_for_financial_invalid_signature_fires_f4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tampered manifest dispatches F4 with reason_code=invalid_signature."""
+    _patch_verify(
+        monkeypatch,
+        ProvenanceResult(
+            has_valid_signature=False,
+            issuer="Acme Org Signing",
+            reason="manifest invalid: claimSignature.mismatch",
+            is_trusted_issuer=False,
+        ),
+    )
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    channel = RecordingChannel()
+    orchestrator = DeepVerifyOrchestrator(
+        audit=audit,
+        channel=channel,
+        trusted_issuers=("Acme Org Signing",),
+    )
+
+    outcome = orchestrator.verify_for_financial(tmp_path / "invoice.pdf", recipient="cfo-device")
+
+    assert outcome.financial.triggered is True
+    assert outcome.financial.reason_code == "invalid_signature"
+    assert len(channel.sent) == 1
+
+
+def test_verify_for_financial_no_manifest_fires_f4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unsigned document dispatches F4 with reason_code=no_manifest."""
+    _patch_verify(
+        monkeypatch,
+        ProvenanceResult(
+            has_valid_signature=False,
+            issuer=None,
+            reason="no manifest",
+            is_trusted_issuer=False,
+        ),
+    )
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    channel = RecordingChannel()
+    orchestrator = DeepVerifyOrchestrator(
+        audit=audit,
+        channel=channel,
+        trusted_issuers=("Acme Org Signing",),
+    )
+
+    outcome = orchestrator.verify_for_financial(tmp_path / "invoice.pdf", recipient="cfo-device")
+
+    assert outcome.financial.triggered is True
+    assert outcome.financial.reason_code == "no_manifest"
+    assert len(channel.sent) == 1
+
+
+def test_verify_for_financial_requires_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No channel configured → RuntimeError before any silent skip.
+
+    ACM 1.2: an F4 path with no dispatch destination is worse than no path —
+    fail loudly rather than pretending to defend.
+    """
+    _patch_verify(
+        monkeypatch,
+        ProvenanceResult(
+            has_valid_signature=True,
+            issuer="Acme Org Signing",
+            reason="valid C2PA manifest",
+            is_trusted_issuer=True,
+        ),
+    )
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    orchestrator = DeepVerifyOrchestrator(
+        audit=audit,
+        channel=None,
+        trusted_issuers=("Acme Org Signing",),
+    )
+
+    with pytest.raises(RuntimeError, match="channel"):
+        orchestrator.verify_for_financial(tmp_path / "invoice.pdf", recipient="cfo-device")
+
+
+def test_verify_for_financial_events_share_one_audit_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both the F3 verdict and the F4 outcome land in the same F5 hash chain."""
+    _patch_verify(
+        monkeypatch,
+        ProvenanceResult(
+            has_valid_signature=False,
+            issuer=None,
+            reason="no manifest",
+            is_trusted_issuer=False,
+        ),
+    )
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    orchestrator = DeepVerifyOrchestrator(
+        audit=audit,
+        channel=RecordingChannel(),
+        trusted_issuers=("Acme Org Signing",),
+    )
+
+    orchestrator.verify_for_financial(tmp_path / "invoice.pdf", recipient="cfo-device")
+
+    records = audit.read_all()
+    assert [r.event for r in records] == [PROV_EVENT, PROV_FIN_EVENT]
+    # The F3 audit event records the trust signal honestly.
+    assert records[0].payload["is_trusted_issuer"] is False
+    assert records[0].payload["has_valid_signature"] is False
+    # The F4 audit event records what was dispatched and why.
+    assert records[1].payload["triggered"] is True
+    assert records[1].payload["reason_code"] == "no_manifest"
+    assert records[1].payload["dispatched"] is True
     assert audit.verify_chain() is True
 
 
