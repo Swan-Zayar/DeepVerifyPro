@@ -49,7 +49,9 @@ from deepverify_pro.api.schemas import (
     DetectResponse,
     FinancialOut,
     HealthResponse,
+    ProvenanceFinancialOut,
     ProvenanceOut,
+    VerifyFinancialResponse,
 )
 from deepverify_pro.audit.log import AuditLog, AuditTampered
 from deepverify_pro.authorization import LocalFileChannel
@@ -95,6 +97,11 @@ def build_default_orchestrator(settings: Settings) -> DeepVerifyOrchestrator:
     checkpoint is installed, falling back to the landmark baseline and then to
     no video pipeline — see :func:`_select_video_detector`. The audit log and
     the F4 challenge channel are local files on the deploying machine (ACM 1.6).
+
+    ``Settings.signing_trusted_issuers`` (deployment allow-list of leaf-cert
+    CNs) is threaded through so the F3 verdict honestly distinguishes a
+    cryptographically valid signature from a deployment-trusted one (ACM 1.3 /
+    §5 anti-pattern guard).
     """
     audit = AuditLog(settings.audit_path)
     return DeepVerifyOrchestrator(
@@ -103,6 +110,7 @@ def build_default_orchestrator(settings: Settings) -> DeepVerifyOrchestrator:
         video_detector=_select_video_detector(settings),
         channel=LocalFileChannel(settings.challenge_log_path),
         financial_threshold=settings.financial_amount_threshold,
+        trusted_issuers=settings.signing_trusted_issuers,
     )
 
 
@@ -141,6 +149,7 @@ def _detect_response(tick: OrchestratorTick) -> DetectResponse:
     if tick.provenance is not None:
         provenance = ProvenanceOut(
             has_valid_signature=tick.provenance.has_valid_signature,
+            is_trusted_issuer=tick.provenance.is_trusted_issuer,
             issuer=tick.provenance.issuer,
             reason=tick.provenance.reason,
         )
@@ -301,21 +310,66 @@ def create_app(
             background=BackgroundTask(output_path.unlink, missing_ok=True),
         )
 
-    @app.post("/verify", response_model=ProvenanceOut)
-    def verify(file: Annotated[UploadFile, File()]) -> ProvenanceOut:
-        """F3 — verify an uploaded asset's C2PA manifest."""
+    @app.post("/verify", response_model=ProvenanceOut | VerifyFinancialResponse)
+    def verify(
+        file: Annotated[UploadFile, File()],
+        financial_context: Annotated[bool, Form()] = False,
+        recipient: Annotated[str, Form()] = "",
+    ) -> ProvenanceOut | VerifyFinancialResponse:
+        """F3 — verify an uploaded asset's C2PA manifest.
+
+        When ``financial_context`` is true the verifier is composed with the
+        F4 out-of-band trigger: if the document is unsigned, has an invalid
+        signature, or is signed by an issuer not on the deployment's trust
+        list, an OOB challenge is dispatched to ``recipient`` (a registered
+        device handle the channel implementation resolves). Defence in depth
+        — the trigger never consults a detector score (§4.3 / ACM 1.2). Both
+        the F3 verdict and the F4 outcome land in the same F5 hash chain.
+
+        The §5 honesty anti-pattern this composition exists to prevent:
+        "valid signature alone authorises a financial action" — an attacker
+        can produce a cryptographically valid manifest with their own
+        self-signed cert (ACM 1.3 / 2.5).
+        """
         input_path = _spool(file, _suffix(file))
         try:
-            result = orch.verify(input_path)
-        except ProvenanceVerifierError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            if financial_context:
+                try:
+                    outcome = orch.verify_for_financial(input_path, recipient=recipient)
+                except ProvenanceVerifierError as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except ValueError as exc:
+                    # Empty recipient on a fired trigger — surface 422 not 500.
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                provenance = ProvenanceOut(
+                    has_valid_signature=outcome.provenance.has_valid_signature,
+                    is_trusted_issuer=outcome.provenance.is_trusted_issuer,
+                    issuer=outcome.provenance.issuer,
+                    reason=outcome.provenance.reason,
+                )
+                receipt = outcome.financial.receipt
+                financial = ProvenanceFinancialOut(
+                    triggered=outcome.financial.triggered,
+                    reason_code=outcome.financial.reason_code,
+                    dispatched=receipt.dispatched if receipt is not None else False,
+                    challenge_id=receipt.challenge_id if receipt is not None else None,
+                )
+                return VerifyFinancialResponse(
+                    provenance=provenance,
+                    financial=financial,
+                )
+            try:
+                result = orch.verify(input_path)
+            except ProvenanceVerifierError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            return ProvenanceOut(
+                has_valid_signature=result.has_valid_signature,
+                is_trusted_issuer=result.is_trusted_issuer,
+                issuer=result.issuer,
+                reason=result.reason,
+            )
         finally:
             input_path.unlink(missing_ok=True)
-        return ProvenanceOut(
-            has_valid_signature=result.has_valid_signature,
-            issuer=result.issuer,
-            reason=result.reason,
-        )
 
     @app.get("/audit", response_model=AuditResponse)
     def audit(limit: int | None = None) -> AuditResponse:
