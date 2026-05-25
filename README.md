@@ -58,6 +58,8 @@ This extends provenance verification beyond internal communications to flag the 
 
 When DeepVerify Pro detects financial language during a call — wire-transfer requests, account numbers, or payment approvals above a defined threshold — it automatically sends a separate verification request to the requester's registered device through an **independent channel completely outside the call environment**. No financial transaction can be processed until this out-of-band confirmation is completed on the requester's separate registered device.
 
+The trigger also fires on **provenance failure** for any financial document submitted through the verification surface (`/verify` with `financial_context=true`). A document fails when it is **unsigned**, has an **invalid signature**, or is **signed by an issuer not on the deployment's trust list**. Cryptographic validity alone is never sufficient — an attacker can produce a valid C2PA manifest with their own self-signed cert, so the deployment vouches separately for who is allowed to sign.
+
 > [!IMPORTANT]
 > This trigger fires **regardless of the detection score**. Even if both the audio and video engines fail to flag a sophisticated deepfake, no financial authorisation can be completed on the basis of a single call alone.
 >
@@ -99,9 +101,22 @@ flowchart LR
 - **Video pipeline** — analyses each incoming video frame with a separate CNN trained to detect facial inconsistencies typical of deepfake generation (unnatural skin texture, irregular blinking, lighting mismatches, micro-expression irregularities), tracking 68 facial landmarks per frame.
 - **Provenance pipeline** — operates at the communication-infrastructure level, embedding C2PA-compliant signatures into outgoing communications and verifying incoming ones before they reach the recipient. Runs **independently** of the detection engines, so its protection does not depend on the sophistication of the synthetic content.
 
-All three pipelines run as a lightweight background plugin integrated via the **Zoom and Microsoft Teams developer APIs**.
-
 > [!NOTE]
 > **Privacy by architecture.** The entire analysis occurs on the organisation's own servers — **no audio, video, or communication data is transmitted to external third-party servers** — protecting organisational privacy and complying with GDPR, the Australian Privacy Act, and ACM principle 1.6.
 
 Users see only a simple colour-coded indicator throughout the call, requiring no technical knowledge to interpret — accessible to all employees regardless of technical background.
+
+---
+
+## 3.5 Configuring the deployment trust list (F3 + F4)
+
+The product runs on-prem with no internet at runtime, so there is no public PKI to defer to — the **deploying organisation's own signing infrastructure** is the only legitimate source of signed financial documents. The trust anchor is an allow-list of leaf-certificate common names configured via `Settings.signing_trusted_issuers`:
+
+```sh
+# .env (gitignored)
+DVP_SIGNING_TRUSTED_ISSUERS=["Acme Org Signing","Acme Org Finance Signing"]
+```
+
+- **Fail-closed default.** An empty list means **every** issuer is untrusted. Until the deployment populates it, `/verify` with `financial_context=true` refuses every financial document — that is the honest answer, never a silent pass.
+- **Two separate booleans.** The verifier returns both `has_valid_signature` (cryptographic integrity only) and `is_trusted_issuer` (the leaf-cert CN appears in the allow-list). Conflating them is the §5 anti-pattern this composition exists to prevent.
+- **Audit hygiene.** Both signals — and the OOB challenge dispatch result — are appended to the F5 hash chain on every call. A passing document still leaves a record.

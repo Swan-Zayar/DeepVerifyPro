@@ -42,10 +42,20 @@ class DetectorResultOut(BaseModel):
 
 
 class ProvenanceOut(BaseModel):
-    """F3 verdict. ``has_valid_signature`` is the cryptographic-integrity
-    check only; ``reason`` keeps any trust caveat visible (ACM 1.3)."""
+    """F3 verdict.
+
+    ``has_valid_signature`` is the cryptographic-integrity check only — it
+    tells the client the bytes were signed by *someone* with a matching key.
+    ``is_trusted_issuer`` is the separate allow-list check against the
+    deployment's configured signing issuers. Both are surfaced because
+    conflating them is the §5 anti-pattern this product exists to prevent
+    (an attacker can produce a cryptographically valid manifest with a
+    freshly self-signed cert). ``reason`` keeps any trust caveat visible
+    in plain text (ACM 1.3).
+    """
 
     has_valid_signature: bool
+    is_trusted_issuer: bool
     issuer: str | None
     reason: str
 
@@ -61,6 +71,37 @@ class FinancialOut(BaseModel):
     threshold: float
     dispatched: bool
     challenge_id: str | None
+
+
+class ProvenanceFinancialOut(BaseModel):
+    """F3+F4 composition outcome — the OOB dispatch result for a financial doc.
+
+    ``triggered`` is True iff the document failed one of the three checks
+    (no manifest, invalid signature, untrusted issuer) and an out-of-band
+    challenge was dispatched to ``recipient``. ``reason_code`` names which
+    check failed; ``challenge_id`` is the channel receipt id when dispatched.
+    Defence in depth (CODING_STANDARDS §4.3 / ACM 1.2): this trigger never
+    consults a detector score.
+    """
+
+    triggered: bool
+    reason_code: str | None
+    dispatched: bool
+    challenge_id: str | None
+
+
+class VerifyFinancialResponse(BaseModel):
+    """Response for ``/verify`` with ``financial_context=true``.
+
+    Surfaces the F3 verdict (provenance) and the F4 composition outcome
+    (financial) side-by-side so the client can render both honestly: a
+    passing document still reports its trust signal, and a fired challenge
+    tells the operator the document failed one of the three checks with the
+    precise reason code (ACM 1.3 / 2.5 — slice ≠ verdict).
+    """
+
+    provenance: ProvenanceOut
+    financial: ProvenanceFinancialOut
 
 
 class DetectResponse(BaseModel):

@@ -35,7 +35,7 @@ from typing import Final
 
 from google.adk.tools import FunctionTool
 
-from deepverify_pro.audit.log import AuditLog
+from deepverify_pro.audit.log import AuditLog, SessionAuditLog
 from deepverify_pro.authorization.trigger import OutOfBandChannel
 from deepverify_pro.detection.base import DetectionResult, Detector, Frame
 from deepverify_pro.provenance import ProvenanceResult, SignResult
@@ -44,6 +44,10 @@ from deepverify_pro.tools.audit_log import audit_log
 from deepverify_pro.tools.financial_trigger import (
     FinancialTriggerOutcome,
     financial_trigger,
+)
+from deepverify_pro.tools.provenance_financial_trigger import (
+    ProvenanceFinancialOutcome,
+    provenance_financial_trigger,
 )
 from deepverify_pro.tools.provenance_verify import provenance_verify
 from deepverify_pro.tools.sign_media import sign_media
@@ -70,6 +74,21 @@ class OrchestratorTick:
     financial: FinancialTriggerOutcome | None
 
 
+@dataclass(frozen=True)
+class FinancialVerifyOutcome:
+    """Result of the F3+F4 ``verify_for_financial`` composition.
+
+    Carries the underlying provenance verdict and the F4 dispatch result so
+    the surface can render both — *both* signals are operational: a passing
+    provenance check still informs the operator, and a fired challenge tells
+    them the document failed one of the three checks (missing / invalid /
+    untrusted) with the precise reason code.
+    """
+
+    provenance: ProvenanceResult
+    financial: ProvenanceFinancialOutcome
+
+
 class DeepVerifyOrchestrator:
     """Single deterministic ADK orchestrator over the six F1–F5 tools."""
 
@@ -83,6 +102,7 @@ class DeepVerifyOrchestrator:
         video_detector: Detector | None = None,
         channel: OutOfBandChannel | None = None,
         financial_threshold: float = 0.0,
+        trusted_issuers: tuple[str, ...] = (),
         max_workers: int = 4,
     ) -> None:
         if financial_threshold < 0.0:
@@ -94,6 +114,10 @@ class DeepVerifyOrchestrator:
         self._video_detector: Detector | None = video_detector
         self._channel: OutOfBandChannel | None = channel
         self._financial_threshold: float = financial_threshold
+        # Empty trust list ⇒ no issuer is trusted (fail-closed). The
+        # deploying organisation populates Settings.signing_trusted_issuers
+        # with its own signing infrastructure's leaf-cert common names.
+        self._trusted_issuers: tuple[str, ...] = trusted_issuers
         self._max_workers: int = max_workers
         self._tick_counter: int = 0
         # ``tick`` may run concurrently — FastAPI dispatches sync endpoints on a
@@ -101,15 +125,18 @@ class DeepVerifyOrchestrator:
         # lock two ticks could collide and emit duplicate/out-of-order IDs.
         self._tick_lock: threading.Lock = threading.Lock()
 
-        # The six-tool ADK surface (CODING_STANDARDS §2). Registered once so
-        # the function metadata is captured for any future ADK runner; the
-        # orchestrator calls the underlying functions directly during ticks.
+        # The seven-tool ADK surface (CODING_STANDARDS §2 — owner-approved
+        # extension from six to seven for the F3+F4 composition; see
+        # DEVIATIONS.md). Registered once so the function metadata is
+        # captured for any future ADK runner; the orchestrator calls the
+        # underlying functions directly during ticks.
         self._tools: tuple[FunctionTool, ...] = (
             FunctionTool(audio_detect),
             FunctionTool(video_detect),
             FunctionTool(provenance_verify),
             FunctionTool(sign_media),
             FunctionTool(financial_trigger),
+            FunctionTool(provenance_financial_trigger),
             FunctionTool(audit_log),
         )
 
@@ -153,8 +180,57 @@ class DeepVerifyOrchestrator:
 
         Mirrors :meth:`sign`: routed through the orchestrator so the verdict
         lands in the same F5 hash chain as the detection-side events (§4.4).
+        The deployment trust list is passed through so ``is_trusted_issuer``
+        is computed honestly (ACM 1.3).
         """
-        return provenance_verify(input_path, audit=self._audit)
+        return provenance_verify(
+            input_path,
+            audit=self._audit,
+            trusted_issuers=self._trusted_issuers,
+        )
+
+    def verify_for_financial(
+        self,
+        input_path: Path,
+        *,
+        recipient: str,
+    ) -> FinancialVerifyOutcome:
+        """F3+F4 composition — verify a financial document and fire OOB if it fails.
+
+        Runs :func:`provenance_verify` (with the deployment trust list) then
+        :func:`provenance_financial_trigger` (with the resulting
+        :class:`ProvenanceResult`). Both events land in the same F5 hash
+        chain. The F4 challenge fires iff the document is unsigned, has an
+        invalid signature, or is signed by an issuer not on the trust list —
+        the §5 honesty anti-pattern this composition exists to prevent
+        ("valid signature alone authorises a financial action").
+
+        ``recipient`` is the operator's chosen out-of-band destination (a
+        registered-device handle the channel implementation resolves). It is
+        only consulted when the trigger fires; a passing document never
+        contacts the channel.
+        """
+        provenance_result = provenance_verify(
+            input_path,
+            audit=self._audit,
+            trusted_issuers=self._trusted_issuers,
+        )
+        if self._channel is None:
+            raise RuntimeError(
+                "verify_for_financial requires an out-of-band channel — "
+                "construct DeepVerifyOrchestrator with channel=... so F4 can "
+                "dispatch when provenance fails (ACM 1.2 defence in depth)"
+            )
+        financial_outcome = provenance_financial_trigger(
+            provenance_result,
+            recipient=recipient,
+            channel=self._channel,
+            audit=self._audit,
+        )
+        return FinancialVerifyOutcome(
+            provenance=provenance_result,
+            financial=financial_outcome,
+        )
 
     def tick(
         self,
@@ -164,6 +240,7 @@ class DeepVerifyOrchestrator:
         provenance_path: Path | None = None,
         transcript: str | None = None,
         recipient: str = "",
+        session_id: str | None = None,
     ) -> OrchestratorTick:
         """Part B — one coordinated cycle over the four runtime pipelines.
 
@@ -177,11 +254,19 @@ class DeepVerifyOrchestrator:
         ``orchestrator.tick.end`` event is still written (with an ``error``
         field) before the exception propagates, so the F5 chain never keeps
         an orphaned start record (§4.4 / ACM 3.1, 3.7).
+
+        When ``session_id`` is supplied, every audit append made during this
+        tick is routed through a :class:`SessionAuditLog` proxy that stamps
+        the id into the payload. The underlying global hash chain is
+        unchanged — the proxy only adds a key so the slice can later be
+        filtered for that session's user (F5 per-session download).
         """
-        with self._tick_lock:
-            self._tick_counter += 1
-            tick_id = self._tick_counter
-        self._audit.append(
+        self._tick_counter += 1
+        tick_id = self._tick_counter
+        tick_audit: AuditLog = (
+            SessionAuditLog(self._audit, session_id) if session_id else self._audit
+        )
+        tick_audit.append(
             TICK_START_EVENT,
             {
                 "tick_id": tick_id,
@@ -211,20 +296,21 @@ class DeepVerifyOrchestrator:
                         audio_detect,
                         audio_frame,
                         detector=self._audio_detector,
-                        audit=self._audit,
+                        audit=tick_audit,
                     )
                 if video_frame is not None and self._video_detector is not None:
                     video_future = pool.submit(
                         video_detect,
                         video_frame,
                         detector=self._video_detector,
-                        audit=self._audit,
+                        audit=tick_audit,
                     )
                 if provenance_path is not None:
                     provenance_future = pool.submit(
                         provenance_verify,
                         provenance_path,
-                        audit=self._audit,
+                        audit=tick_audit,
+                        trusted_issuers=self._trusted_issuers,
                     )
                 # F4 is dispatched independently of any detector future —
                 # §4.3 / ACM 1.2. It consults no detector score and no
@@ -237,7 +323,7 @@ class DeepVerifyOrchestrator:
                         threshold=self._financial_threshold,
                         recipient=recipient,
                         channel=self._channel,
-                        audit=self._audit,
+                        audit=tick_audit,
                     )
 
                 audio_result = audio_future.result() if audio_future is not None else None
@@ -258,7 +344,7 @@ class DeepVerifyOrchestrator:
             # Always close the tick in the audit chain, success or failure,
             # so a crashed pipeline never leaves an orphaned start record
             # (§4.4 / ACM 3.1, 3.7).
-            self._audit.append(
+            tick_audit.append(
                 TICK_END_EVENT,
                 {
                     "tick_id": tick_id,

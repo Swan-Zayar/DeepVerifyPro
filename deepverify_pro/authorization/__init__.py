@@ -11,7 +11,9 @@ from deepverify_pro.authorization.trigger import (
     FinancialTriggerResult,
     OutOfBandChallenge,
     OutOfBandChannel,
+    TriggerReasonCode,
     build_challenge,
+    build_provenance_challenge,
     evaluate_transcript,
 )
 
@@ -22,6 +24,8 @@ __all__ = [
     "OutOfBandChallenge",
     "OutOfBandChannel",
     "RecordingChannel",
+    "TriggerReasonCode",
     "build_challenge",
+    "build_provenance_challenge",
     "evaluate_transcript",
 ]

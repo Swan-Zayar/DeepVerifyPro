@@ -9,6 +9,7 @@ Scope: in-product.md
 from __future__ import annotations
 
 import io
+import json
 import shutil
 from pathlib import Path
 
@@ -107,13 +108,14 @@ def _client(tmp_path: Path, orchestrator: DeepVerifyOrchestrator) -> TestClient:
 # ---------- health ----------
 
 
-def test_health_reports_the_six_tool_surface(tmp_path: Path) -> None:
+def test_health_reports_the_seven_tool_surface(tmp_path: Path) -> None:
     client = _client(tmp_path, _orchestrator(tmp_path))
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert len(body["tools"]) == 6
+    assert len(body["tools"]) == 7
+    assert "provenance_financial_trigger" in body["tools"]
 
 
 # ---------- F1 detect ----------
@@ -226,6 +228,141 @@ def test_sign_then_verify_roundtrip(tmp_path: Path) -> None:
     assert verify_resp.json()["has_valid_signature"] is True
 
 
+# ---------- F3+F4 composition over /verify?financial_context=true ----------
+
+
+@requires_c2patool
+def test_verify_unsigned_in_financial_context_fires_oob(tmp_path: Path) -> None:
+    """An unsigned asset submitted for financial verification dispatches F4.
+
+    §5 anti-pattern guard: the API must never quietly let an unsigned
+    financial document through. Reason code must be ``no_manifest``.
+    """
+    channel = RecordingChannel()
+    orchestrator = _orchestrator(tmp_path, channel=channel)
+    client = _client(tmp_path, orchestrator)
+    resp = client.post(
+        "/verify",
+        files={"file": ("invoice.png", _png_bytes(), "image/png")},
+        data={"financial_context": "true", "recipient": "cfo-device"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provenance"]["has_valid_signature"] is False
+    assert body["provenance"]["is_trusted_issuer"] is False
+    assert body["financial"]["triggered"] is True
+    assert body["financial"]["reason_code"] == "no_manifest"
+    assert body["financial"]["dispatched"] is True
+    assert len(channel.sent) == 1
+    assert orchestrator.audit.verify_chain() is True
+
+
+@requires_c2patool
+def test_verify_signed_untrusted_in_financial_context_fires_oob(tmp_path: Path) -> None:
+    """A cryptographically valid signature from an issuer not on the
+    trust list still fires F4 — this is the §5 anti-pattern this composition
+    exists to prevent (an attacker self-signs their forgery)."""
+    ca = tmp_path / "ca.crt"
+    cert = tmp_path / "leaf.crt"
+    key = tmp_path / "leaf.key"
+    mint_chain(ca, cert, key, validity_days=30)
+    # trust list does NOT include the signer's CN
+    settings = _settings(
+        tmp_path,
+        signing_cert_path=cert,
+        signing_key_path=key,
+        signing_trusted_issuers=(),
+    )
+    channel = RecordingChannel()
+    orchestrator = _orchestrator(tmp_path, channel=channel)
+    client = TestClient(create_app(settings=settings, orchestrator=orchestrator))
+
+    sign_resp = client.post("/sign", files={"file": ("photo.png", _png_bytes(), "image/png")})
+    assert sign_resp.status_code == 200
+    signed = sign_resp.content
+
+    resp = client.post(
+        "/verify",
+        files={"file": ("signed.png", signed, "image/png")},
+        data={"financial_context": "true", "recipient": "cfo-device"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provenance"]["has_valid_signature"] is True
+    assert body["provenance"]["is_trusted_issuer"] is False
+    assert body["financial"]["triggered"] is True
+    assert body["financial"]["reason_code"] == "untrusted_issuer"
+    assert len(channel.sent) == 1
+
+
+@requires_c2patool
+def test_verify_signed_trusted_in_financial_context_does_not_fire(tmp_path: Path) -> None:
+    """The pass condition: trusted-issuer + valid signature → no challenge."""
+    ca = tmp_path / "ca.crt"
+    cert = tmp_path / "leaf.crt"
+    key = tmp_path / "leaf.key"
+    mint_chain(ca, cert, key, validity_days=30)
+    settings = _settings(
+        tmp_path,
+        signing_cert_path=cert,
+        signing_key_path=key,
+        signing_trusted_issuers=("DeepVerify Pro Test Signer",),
+    )
+    channel = RecordingChannel()
+    orchestrator = _orchestrator(
+        tmp_path,
+        channel=channel,
+        trusted_issuers=("DeepVerify Pro Test Signer",),
+    )
+    client = TestClient(create_app(settings=settings, orchestrator=orchestrator))
+
+    sign_resp = client.post("/sign", files={"file": ("photo.png", _png_bytes(), "image/png")})
+    assert sign_resp.status_code == 200
+
+    resp = client.post(
+        "/verify",
+        files={"file": ("signed.png", sign_resp.content, "image/png")},
+        data={"financial_context": "true", "recipient": "cfo-device"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provenance"]["has_valid_signature"] is True
+    assert body["provenance"]["is_trusted_issuer"] is True
+    assert body["financial"]["triggered"] is False
+    assert body["financial"]["reason_code"] is None
+    assert len(channel.sent) == 0
+
+
+@requires_c2patool
+def test_verify_financial_context_without_recipient_is_422(tmp_path: Path) -> None:
+    """A fired trigger with no recipient is refused — a challenge to no one
+    silently defeats the defence-in-depth check (ACM 1.2)."""
+    orchestrator = _orchestrator(tmp_path)
+    client = _client(tmp_path, orchestrator)
+    resp = client.post(
+        "/verify",
+        files={"file": ("invoice.png", _png_bytes(), "image/png")},
+        data={"financial_context": "true"},
+    )
+    assert resp.status_code == 422
+
+
+@requires_c2patool
+def test_verify_without_financial_context_returns_plain_provenance(tmp_path: Path) -> None:
+    """Default path: ``/verify`` without ``financial_context`` returns the
+    plain F3 verdict (now including ``is_trusted_issuer``) and never fires F4."""
+    channel = RecordingChannel()
+    orchestrator = _orchestrator(tmp_path, channel=channel)
+    client = _client(tmp_path, orchestrator)
+    resp = client.post("/verify", files={"file": ("x.png", _png_bytes(), "image/png")})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_valid_signature"] is False
+    assert body["is_trusted_issuer"] is False
+    assert "financial" not in body
+    assert len(channel.sent) == 0
+
+
 # ---------- F5 audit ----------
 
 
@@ -263,6 +400,66 @@ def test_audit_records_carry_no_media_keys(tmp_path: Path) -> None:
     for record in records:
         for key in forbidden:
             assert key not in record["payload"]
+
+
+# ---------- F5 per-session audit slice (download) ----------
+
+
+def test_audit_session_endpoint_returns_only_matching_records(tmp_path: Path) -> None:
+    """The slice contains the requested session's events; other sessions and
+    untagged events stay out. Each record keeps its original seq so the
+    global chain order is preserved in the download."""
+    orchestrator = _orchestrator(tmp_path, audio_detector=BaselineAudioDetector())
+    client = _client(tmp_path, orchestrator)
+    client.post(
+        "/detect",
+        files={"audio": ("a.wav", _wav_bytes(), "audio/wav")},
+        data={"session_id": "sess-A"},
+    )
+    client.post(
+        "/detect",
+        files={"audio": ("b.wav", _wav_bytes(), "audio/wav")},
+        data={"session_id": "sess-B"},
+    )
+
+    resp = client.get("/audit/session/sess-A")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    assert resp.headers["content-disposition"] == (
+        'attachment; filename="audit-session-sess-A.jsonl"'
+    )
+    lines = [line for line in resp.text.splitlines() if line]
+    records = [json.loads(line) for line in lines]
+    assert records, "expected at least one record for sess-A"
+    for record in records:
+        assert record["payload"]["session_id"] == "sess-A"
+    # the orchestrator's global chain is still one continuous chain
+    assert orchestrator.audit.verify_chain() is True
+
+
+def test_audit_session_endpoint_rejects_invalid_session_id(tmp_path: Path) -> None:
+    """Path-component / Content-Disposition injection is refused at the boundary.
+
+    Either the route handler's regex returns 400, or Starlette's path router
+    refuses to match (404) when the decoded id contains a path separator —
+    both are valid rejections at the boundary.
+    """
+    client = _client(tmp_path, _orchestrator(tmp_path))
+    resp = client.get("/audit/session/has spaces")
+    assert resp.status_code == 400
+    resp = client.get("/audit/session/has%2Fslash")
+    assert resp.status_code in {400, 404}
+
+
+def test_detect_rejects_invalid_session_id_form_field(tmp_path: Path) -> None:
+    orchestrator = _orchestrator(tmp_path, audio_detector=BaselineAudioDetector())
+    client = _client(tmp_path, orchestrator)
+    resp = client.post(
+        "/detect",
+        files={"audio": ("a.wav", _wav_bytes(), "audio/wav")},
+        data={"session_id": "bad id"},
+    )
+    assert resp.status_code == 400
 
 
 # ---------- ACM 1.6: CORS is scoped to the local frontend origins ----------

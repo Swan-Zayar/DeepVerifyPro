@@ -22,15 +22,18 @@ detector's ``is_production`` flag; a baseline is never surfaced as a verdict.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 
 from deepverify_pro.agents import DeepVerifyOrchestrator
@@ -48,38 +51,68 @@ from deepverify_pro.api.schemas import (
     DetectResponse,
     FinancialOut,
     HealthResponse,
+    ProvenanceFinancialOut,
     ProvenanceOut,
+    VerifyFinancialResponse,
 )
 from deepverify_pro.audit.log import AuditLog, AuditTampered
 from deepverify_pro.authorization import LocalFileChannel
 from deepverify_pro.config import Settings, get_settings
 from deepverify_pro.detection.audio import BaselineAudioDetector
-from deepverify_pro.detection.base import DetectionResult
+from deepverify_pro.detection.base import DetectionResult, Detector
 from deepverify_pro.detection.video.baseline import BaselineVideoDetector
+from deepverify_pro.detection.video.efficientnet_sbi import EfficientNetSBIDetector
 from deepverify_pro.provenance import ProvenanceSignerError, ProvenanceVerifierError
 from deepverify_pro.provenance.verifier import C2PATOOL_BIN
+
+# Conservative whitelist for session ids used both as a form input and as a
+# filename component in the per-session download. Restricting to URL- and
+# filename-safe chars prevents Content-Disposition / path-component injection.
+_SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _select_video_detector(settings: Settings) -> Detector | None:
+    """Pick the F2 video detector for the live ``/detect`` path.
+
+    Prefers the M8 trained model — :class:`EfficientNetSBIDetector` — whenever
+    its checkpoint is on disk, so the live path runs the real EfficientNet-B4 /
+    Self-Blended-Images network rather than the geometric baseline. Falls back
+    to the 68-landmark :class:`BaselineVideoDetector` when only the dlib
+    predictor is present, and to ``None`` (the orchestrator simply skips the
+    video pipeline) when neither weight file exists.
+
+    Both detectors keep ``is_production = False`` and the API echoes that flag,
+    so a prototype score is never surfaced as a verdict (ACM 1.3 / 2.5). Weights
+    load from local files only — no runtime network, no media egress (ACM 1.6).
+    """
+    if settings.sbi_weights_path.is_file():
+        return EfficientNetSBIDetector(settings.sbi_weights_path)
+    if settings.dlib_landmarks_path.is_file():
+        return BaselineVideoDetector(settings.dlib_landmarks_path)
+    return None
 
 
 def build_default_orchestrator(settings: Settings) -> DeepVerifyOrchestrator:
     """Construct the orchestrator the API serves from, wired to live tools.
 
-    The video detector is wired only when the dlib 68-point predictor is
-    present on disk; otherwise the orchestrator simply skips the video
-    pipeline (it tolerates ``video_detector=None``). The audit log and the F4
-    challenge channel are local files on the deploying machine (ACM 1.6).
+    The video pipeline uses the trained EfficientNet-B4 / SBI detector when its
+    checkpoint is installed, falling back to the landmark baseline and then to
+    no video pipeline — see :func:`_select_video_detector`. The audit log and
+    the F4 challenge channel are local files on the deploying machine (ACM 1.6).
+
+    ``Settings.signing_trusted_issuers`` (deployment allow-list of leaf-cert
+    CNs) is threaded through so the F3 verdict honestly distinguishes a
+    cryptographically valid signature from a deployment-trusted one (ACM 1.3 /
+    §5 anti-pattern guard).
     """
     audit = AuditLog(settings.audit_path)
-    video_detector = (
-        BaselineVideoDetector(settings.dlib_landmarks_path)
-        if settings.dlib_landmarks_path.is_file()
-        else None
-    )
     return DeepVerifyOrchestrator(
         audit=audit,
         audio_detector=BaselineAudioDetector(),
-        video_detector=video_detector,
+        video_detector=_select_video_detector(settings),
         channel=LocalFileChannel(settings.challenge_log_path),
         financial_threshold=settings.financial_amount_threshold,
+        trusted_issuers=settings.signing_trusted_issuers,
     )
 
 
@@ -118,6 +151,7 @@ def _detect_response(tick: OrchestratorTick) -> DetectResponse:
     if tick.provenance is not None:
         provenance = ProvenanceOut(
             has_valid_signature=tick.provenance.has_valid_signature,
+            is_trusted_issuer=tick.provenance.is_trusted_issuer,
             issuer=tick.provenance.issuer,
             reason=tick.provenance.reason,
         )
@@ -191,6 +225,7 @@ def create_app(
         transcript: Annotated[str | None, Form()] = None,
         recipient: Annotated[str, Form()] = "",
         frame_index: Annotated[int, Form()] = 0,
+        session_id: Annotated[str | None, Form()] = None,
     ) -> DetectResponse:
         """Part B — run one orchestrator tick over the supplied media.
 
@@ -216,12 +251,18 @@ def create_app(
                 provenance_path = _spool(provenance, _suffix(provenance))
                 cleanup.append(provenance_path)
             try:
+                if session_id is not None and not _SESSION_ID_RE.match(session_id):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="session_id must be 1-64 chars of [A-Za-z0-9_-]",
+                    )
                 tick = orch.tick(
                     audio_frame=audio_frame,
                     video_frame=video_frame,
                     provenance_path=provenance_path,
                     transcript=transcript,
                     recipient=recipient,
+                    session_id=session_id,
                 )
             except ValueError as exc:
                 # Detector / orchestrator domain errors (no face, audio too
@@ -271,21 +312,66 @@ def create_app(
             background=BackgroundTask(output_path.unlink, missing_ok=True),
         )
 
-    @app.post("/verify", response_model=ProvenanceOut)
-    def verify(file: Annotated[UploadFile, File()]) -> ProvenanceOut:
-        """F3 — verify an uploaded asset's C2PA manifest."""
+    @app.post("/verify", response_model=ProvenanceOut | VerifyFinancialResponse)
+    def verify(
+        file: Annotated[UploadFile, File()],
+        financial_context: Annotated[bool, Form()] = False,
+        recipient: Annotated[str, Form()] = "",
+    ) -> ProvenanceOut | VerifyFinancialResponse:
+        """F3 — verify an uploaded asset's C2PA manifest.
+
+        When ``financial_context`` is true the verifier is composed with the
+        F4 out-of-band trigger: if the document is unsigned, has an invalid
+        signature, or is signed by an issuer not on the deployment's trust
+        list, an OOB challenge is dispatched to ``recipient`` (a registered
+        device handle the channel implementation resolves). Defence in depth
+        — the trigger never consults a detector score (§4.3 / ACM 1.2). Both
+        the F3 verdict and the F4 outcome land in the same F5 hash chain.
+
+        The §5 honesty anti-pattern this composition exists to prevent:
+        "valid signature alone authorises a financial action" — an attacker
+        can produce a cryptographically valid manifest with their own
+        self-signed cert (ACM 1.3 / 2.5).
+        """
         input_path = _spool(file, _suffix(file))
         try:
-            result = orch.verify(input_path)
-        except ProvenanceVerifierError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            if financial_context:
+                try:
+                    outcome = orch.verify_for_financial(input_path, recipient=recipient)
+                except ProvenanceVerifierError as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except ValueError as exc:
+                    # Empty recipient on a fired trigger — surface 422 not 500.
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                provenance = ProvenanceOut(
+                    has_valid_signature=outcome.provenance.has_valid_signature,
+                    is_trusted_issuer=outcome.provenance.is_trusted_issuer,
+                    issuer=outcome.provenance.issuer,
+                    reason=outcome.provenance.reason,
+                )
+                receipt = outcome.financial.receipt
+                financial = ProvenanceFinancialOut(
+                    triggered=outcome.financial.triggered,
+                    reason_code=outcome.financial.reason_code,
+                    dispatched=receipt.dispatched if receipt is not None else False,
+                    challenge_id=receipt.challenge_id if receipt is not None else None,
+                )
+                return VerifyFinancialResponse(
+                    provenance=provenance,
+                    financial=financial,
+                )
+            try:
+                result = orch.verify(input_path)
+            except ProvenanceVerifierError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            return ProvenanceOut(
+                has_valid_signature=result.has_valid_signature,
+                is_trusted_issuer=result.is_trusted_issuer,
+                issuer=result.issuer,
+                reason=result.reason,
+            )
         finally:
             input_path.unlink(missing_ok=True)
-        return ProvenanceOut(
-            has_valid_signature=result.has_valid_signature,
-            issuer=result.issuer,
-            reason=result.reason,
-        )
 
     @app.get("/audit", response_model=AuditResponse)
     def audit(limit: int | None = None) -> AuditResponse:
@@ -324,6 +410,40 @@ def create_app(
             intact=True,
             records_checked=checked,
             detail="hash chain intact",
+        )
+
+    @app.get("/audit/session/{session_id}")
+    def audit_session(session_id: str) -> Response:
+        """F5 — download one session's slice of the chain as a JSONL file.
+
+        Returns the records whose payload was stamped ``session_id`` during
+        their tick, as one JSON object per line. Each record keeps its
+        original ``seq``/``prev_hash``/``hash`` so a downstream reader can
+        re-check per-record hashes; however the slice is not a self-contained
+        chain — full-chain integrity verification requires the global log
+        via :func:`audit_verify` (ACM 1.3 / 2.5 — slice ≠ chain).
+        """
+        if not _SESSION_ID_RE.match(session_id):
+            raise HTTPException(
+                status_code=400,
+                detail="session_id must be 1-64 chars of [A-Za-z0-9_-]",
+            )
+        records = orch.audit.read_session(session_id)
+        body = "".join(
+            json.dumps(dataclasses.asdict(record), sort_keys=True) + "\n" for record in records
+        )
+        headers = {
+            "Content-Disposition": (f'attachment; filename="audit-session-{session_id}.jsonl"'),
+            "X-Session-Record-Count": str(len(records)),
+            "X-Audit-Notice": (
+                "Filtered slice of the global F5 hash chain. Chain-level "
+                "integrity verification requires the full log via /audit/verify."
+            ),
+        }
+        return Response(
+            content=body,
+            media_type="application/x-ndjson",
+            headers=headers,
         )
 
     return app

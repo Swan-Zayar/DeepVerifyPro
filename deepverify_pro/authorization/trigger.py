@@ -27,7 +27,19 @@ import re
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Literal
+
+# The five reasons F4 can fire. The first two are produced by the transcript
+# path (this module); the last three are produced by the F3+F4 composition in
+# ``tools/provenance_financial_trigger.py``. Together they tell an audit
+# reader at a glance WHY the out-of-band challenge was dispatched.
+TriggerReasonCode = Literal[
+    "financial_language",  # transcript keyword match (e.g. "wire transfer")
+    "amount_threshold",  # transcript currency amount ≥ threshold
+    "no_manifest",  # F3 verify: no C2PA manifest on a financial doc
+    "invalid_signature",  # F3 verify: crypto failure (tampered / forged)
+    "untrusted_issuer",  # F3 verify: valid sig but signer not in trust list
+]
 
 # Keyword categories — small on purpose. New keywords need owner discussion
 # (CODING_STANDARDS §0 Scope Lock — false-positive UX cost is a 2.5 risk).
@@ -104,6 +116,11 @@ class OutOfBandChallenge:
     Carries opaque metadata only — never the transcript or detection state.
     The recipient identifier is whatever the channel implementation
     understands (e.g. a registered-device handle); no PII assumptions made.
+
+    ``reason_code`` names the F4 trigger source (one of :data:`TriggerReasonCode`).
+    Defaults to ``"financial_language"`` so existing transcript-path callers
+    keep working without code changes; the F3+F4 composition sets one of the
+    provenance reasons.
     """
 
     challenge_id: str
@@ -111,6 +128,7 @@ class OutOfBandChallenge:
     matched_categories: tuple[str, ...]
     amount: float | None
     threshold: float
+    reason_code: TriggerReasonCode = "financial_language"
 
 
 @dataclass(frozen=True)
@@ -194,16 +212,73 @@ def evaluate_transcript(transcript: str, *, threshold: float) -> FinancialTrigge
     )
 
 
+def _transcript_reason(result: FinancialTriggerResult) -> TriggerReasonCode:
+    """Pick the most-specific transcript-path reason for a fired result.
+
+    Keyword matches win over amount-only triggers because a named category
+    (``wire_transfer`` etc.) is a more specific signal than a bare amount.
+    Both can be true simultaneously; the audit payload still carries the full
+    ``matched_categories`` + ``largest_amount`` for the reviewer.
+    """
+    if result.matched_categories:
+        return "financial_language"
+    return "amount_threshold"
+
+
+def build_provenance_challenge(
+    *,
+    recipient: str,
+    reason_code: TriggerReasonCode,
+) -> OutOfBandChallenge:
+    """Mint a provenance-driven :class:`OutOfBandChallenge` (F3+F4 composition).
+
+    Used when F4 fires because a financial document's C2PA manifest is
+    missing, cryptographically invalid, or signed by an issuer not on the
+    deployment's trust list. The challenge carries no transcript-derived
+    metadata (no matched categories, no amount, threshold=0.0); the
+    ``reason_code`` is the only failure label the audit reviewer needs.
+
+    Raises :class:`ValueError` for an empty ``recipient`` (silent dispatch
+    to no recipient defeats the defence-in-depth check — ACM 1.2) or for a
+    transcript-only reason code (``financial_language`` / ``amount_threshold``),
+    which would mislabel the audit chain.
+    """
+    if not recipient.strip():
+        raise ValueError(
+            "recipient must be non-empty — an out-of-band challenge dispatched "
+            "to no recipient silently defeats the defence-in-depth check (ACM 1.2)"
+        )
+    if reason_code in ("financial_language", "amount_threshold"):
+        raise ValueError(
+            f"reason_code {reason_code!r} is a transcript-path reason; the "
+            "provenance challenge must be one of: no_manifest, "
+            "invalid_signature, untrusted_issuer"
+        )
+    return OutOfBandChallenge(
+        challenge_id=str(uuid.uuid4()),
+        recipient=recipient,
+        matched_categories=(),
+        amount=None,
+        threshold=0.0,
+        reason_code=reason_code,
+    )
+
+
 def build_challenge(
     result: FinancialTriggerResult,
     *,
     recipient: str,
+    reason_code: TriggerReasonCode | None = None,
 ) -> OutOfBandChallenge:
     """Mint an :class:`OutOfBandChallenge` from a fired trigger result.
 
     Raises :class:`ValueError` for a non-triggered ``result`` or an empty
     ``recipient`` — an out-of-band challenge dispatched to no recipient would
     silently defeat the defence-in-depth check (ACM 1.2).
+
+    ``reason_code`` defaults to the most-specific transcript-path reason
+    derived from ``result`` (see :func:`_transcript_reason`). Callers from the
+    F3+F4 composition pass an explicit provenance reason.
     """
     if not result.triggered:
         raise ValueError("cannot build a challenge from a non-triggered result")
@@ -218,4 +293,5 @@ def build_challenge(
         matched_categories=result.matched_categories,
         amount=result.largest_amount,
         threshold=result.threshold,
+        reason_code=reason_code if reason_code is not None else _transcript_reason(result),
     )

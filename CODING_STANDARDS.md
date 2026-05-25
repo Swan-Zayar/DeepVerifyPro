@@ -93,7 +93,7 @@ keys/            signing keys — GITIGNORED, never committed
 
 These substitutions were discussed and approved per the §3 rule ("do not substitute without discussion"):
 
-- **PyTorch deferred.** The prototype baseline uses real feature extraction (librosa MFCC, 68-point landmarks) + a lightweight classical classifier (numpy / scikit-learn), labelled "not production-accurate" (§4.2). PyTorch is reintroduced only when a real trained model lands.
+- **PyTorch deferred.** The prototype baseline uses real feature extraction (librosa MFCC, 68-point landmarks) + a lightweight classical classifier (numpy / scikit-learn), labelled "not production-accurate" (§4.2). PyTorch is reintroduced only when a real trained model lands. *(Deviation lifted 2026-05-23 by owner decision — see the M8 entry below.)*
 - **68-point landmarks via `dlib`** (not mediapipe-468), to stay faithful to product.md §3.3's explicit "68 facial landmark points". Documented fallback: mediapipe-468 with a 68-subset mapping **only if `dlib` will not install**, disclosed in the model card as an approximation (§4.2).
 - **FastAPI deferred.** This round is CLI-only (Typer). FastAPI remains the pinned choice for the next round.
 - **C2PA via the official `c2patool` binary** (not the `c2pa-python` binding). `c2pa-python` 0.32.6 cannot produce a verifiable claim signature for an offline (no-TSA) self-signed signer — verified methodically: `from_info` no-TSA errors `Signature: empty string`; `from_callback` yields `claimSignature.mismatch` for ECDSA-raw, ECDSA-DER, and Ed25519 alike (while cert trust + data-hash bindings pass), proving a wrapper-level TBS defect, not an encoding mistake. `c2patool` is the CAI reference implementation; it signs/verifies offline self-signed correctly. Invoked locally only — no network, no TSA (honors §4.1). Still C2PA, still F3 — no product-scope change.
@@ -126,6 +126,48 @@ These substitutions were discussed and approved per the §3 rule ("do not substi
   claims (free-trial offer, "Contact Sales", "no credit card required") were
   also removed and replaced with honest prototype CTAs (owner-approved
   2026-05-23) — the landing copy now makes no claim the prototype cannot back.
+- **M8 — detection-model milestone: PyTorch deferral lifted; F2 trained
+  detector adopted under a non-commercial-research designation (owner
+  decisions 2026-05-23).** The owner reviewed `M8_PROPOSAL_detection_model.md`
+  §13 and decided each item:
+  - **A — approved.** The "PyTorch deferred" deviation above is **lifted**:
+    PyTorch is no longer deferred as a matter of policy.
+  - **B — approved, with a corrected library.** `torch` (PyTorch) is added as
+    a pinned-stack dependency. The proposal named `timm` for the EfficientNet-B4
+    backbone; verification against the SBI source showed the SBI checkpoint is
+    built with **`efficientnet_pytorch`** (lukemelas/EfficientNet-PyTorch) and
+    its state-dict keys are incompatible with `timm`. `efficientnet-pytorch` is
+    therefore used in place of `timm` — same role (supply the EfficientNet-B4
+    architecture), recorded here per the §3 substitution rule. Both ship in the
+    new `video-model` extra in `pyproject.toml`.
+  - **C — approved pending licence verification; verification performed.** The
+    proposed weights — EfficientNet-B4 trained with Self-Blended Images
+    (Shiohara & Yamasaki, CVPR 2022) — are licensed for **non-commercial
+    academic / research use only** (commercial use explicitly prohibited), and
+    are trained on FaceForensics++, itself non-commercial-research-only and
+    binding on any for-profit employer. Per M8 §7's hard gate ("attribution
+    alone is not permission"), commercial adoption is blocked. The owner
+    **designated DeepVerify Pro a non-commercial research prototype**
+    (2026-05-23); under that designation the weights are licence-compatible.
+    C is **actioned**: `deepverify_pro/detection/video/efficientnet_sbi.py`
+    implements the F2 trained detector as a clean adapter (the SBI framework is
+    not vendored; the `Detector` ABC is unchanged). **Hard constraint: this
+    detector must not be used in a commercial deployment while it carries
+    SBI / FaceForensics++-derived weights.** The restriction is documented in
+    `MODEL_CARD_efficientnet_sbi.md` and `ATTRIBUTIONS.md`. `is_production`
+    stays `False` until the eval harness clears an owner-agreed bar (M8 §10).
+  - **D — approved.** F1 audio anti-spoofing (AASIST / RawNet2) is approved as
+    phase 2 of this milestone, sequenced after F2 — no code this round.
+  - **E — built (no sign-off required).** `scripts/evaluate.py` measures any
+    `Detector` against a labelled test set (ROC-AUC, EER, and the confusion
+    matrix at the indicator thresholds). It adds no dependency and expands no
+    scope (M8 §9).
+  Net effect: the PyTorch deferral is lifted; the F2 trained detector
+  (`video-efficientnet-sbi-v0`) ships behind the unchanged `Detector` ABC with
+  **research-only weights** and `is_production = False` until measured. The
+  F1/F2 heuristic baselines remain in place as honest fallbacks. No
+  product-scope change — this is detection accuracy for F1/F2, already in
+  `product.md`.
 
 ---
 

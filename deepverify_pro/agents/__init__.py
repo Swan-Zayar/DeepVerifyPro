@@ -10,6 +10,7 @@ from deepverify_pro.agents.orchestrator import (
     TICK_END_EVENT,
     TICK_START_EVENT,
     DeepVerifyOrchestrator,
+    FinancialVerifyOutcome,
     OrchestratorTick,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "TICK_END_EVENT",
     "TICK_START_EVENT",
     "DeepVerifyOrchestrator",
+    "FinancialVerifyOutcome",
     "OrchestratorTick",
 ]
