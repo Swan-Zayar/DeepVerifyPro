@@ -23,7 +23,11 @@ from deepverify_pro.config import get_settings
 def main() -> None:
     """Start the API server on the configured localhost host/port."""
     settings = get_settings()
-    uvicorn.run(create_app(), host=settings.api_host, port=settings.api_port)
+    uvicorn.run(
+        create_app(settings=settings),
+        host=settings.api_host,
+        port=settings.api_port,
+    )
 
 
 if __name__ == "__main__":

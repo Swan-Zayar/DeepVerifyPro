@@ -9,10 +9,12 @@ the ADK orchestrator (CODING_STANDARDS §2) — no detection, crypto, or audit
 logic is re-implemented here.
 
 ACM 1.6 (hard rule): the server binds ``127.0.0.1`` by default
-(:class:`Settings.api_host`). Uploaded audio/video is decoded in-process,
-scored, and the temp file deleted in a ``finally`` — media never reaches a
-third party. Audit payloads carry metadata only (enforced by the F5 tools and
-:class:`AuditLog`).
+(:class:`Settings.api_host`). Uploaded audio and video are decoded straight
+from the request bytes in memory — they never touch disk. Provenance uploads
+and the ``/sign`` / ``/verify`` inputs, which the external ``c2patool`` binary
+must read from a path, are spooled to a private temp file that is always
+deleted in a ``finally`` — media never reaches a third party. Audit payloads
+carry metadata only (enforced by the F5 tools and :class:`AuditLog`).
 
 ACM 1.3 / 2.5: responses use probabilistic field names and echo each
 detector's ``is_production`` flag; a baseline is never surfaced as a verdict.

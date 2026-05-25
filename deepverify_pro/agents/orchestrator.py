@@ -27,6 +27,7 @@ concurrent pipelines can all append to a single F5 chain (§4.4).
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,6 +120,10 @@ class DeepVerifyOrchestrator:
         self._trusted_issuers: tuple[str, ...] = trusted_issuers
         self._max_workers: int = max_workers
         self._tick_counter: int = 0
+        # ``tick`` may run concurrently — FastAPI dispatches sync endpoints on a
+        # threadpool — so the tick-id read-modify-write is guarded; without the
+        # lock two ticks could collide and emit duplicate/out-of-order IDs.
+        self._tick_lock: threading.Lock = threading.Lock()
 
         # The seven-tool ADK surface (CODING_STANDARDS §2 — owner-approved
         # extension from six to seven for the F3+F4 composition; see
