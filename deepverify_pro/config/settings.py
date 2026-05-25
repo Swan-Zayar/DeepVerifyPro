@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     # material is never committed (§4.1 / ACM 1.6); override via env if needed.
     signing_cert_path: Path = Field(default=Path("keys/test_signing.crt"))
     signing_key_path: Path = Field(default=Path("keys/test_signing.key"))
+    # F3 — allow-list of issuer common names (leaf-cert CN as reported by
+    # c2patool) that count as trusted signers for the deploying organisation.
+    # The product runs on-prem with no internet — there is no public PKI to
+    # defer to, so the deploying org's own signing infrastructure is the only
+    # legitimate signer source. Fail-closed: an empty list means every issuer
+    # is untrusted, so F3+F4 composition refuses to authorise any financial
+    # document until the operator populates this list (ACM 1.2 / 1.3 / 2.5 —
+    # silent trust-everything would be the §5 anti-pattern).
+    signing_trusted_issuers: tuple[str, ...] = Field(default=())
     # M6 HTTP surface. ACM 1.6: the API binds localhost by default — media
     # endpoints must not be exposed on a public interface in the prototype.
     api_host: str = Field(default="127.0.0.1")

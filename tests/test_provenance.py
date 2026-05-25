@@ -180,3 +180,108 @@ def test_orchestrator_sign_routes_f3_through_shared_audit_chain(
     assert verify(out).has_valid_signature is True
     assert [r.event for r in audit.read_all()] == ["provenance.sign"]
     assert audit.verify_chain() is True
+
+
+# ---------- F3 trust list (deployment allow-list) ----------
+#
+# These tests pin the ACM 1.3 / 2.5 honesty fix: a cryptographically valid
+# signature does NOT imply the signer is on the deployment's trust list. The
+# two booleans must remain distinct, and callers gating financial decisions
+# on provenance must consult both.
+
+_TEST_ISSUER = "DeepVerify Pro Test Signer"
+
+
+def test_empty_trust_list_fails_closed(
+    tiny_png: Path,
+    signing_chain: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    """No allow-list configured ⇒ no issuer is trusted, even a valid one."""
+    cert, key = signing_chain
+    out = tmp_path / "signed.png"
+    sign(tiny_png, out, cert_path=cert, key_path=key)
+
+    result = verify(out, trusted_issuers=())
+    assert result.has_valid_signature is True
+    assert result.is_trusted_issuer is False
+    assert "not in deployment trust list" in result.reason
+
+
+def test_trust_list_with_matching_issuer_marks_trusted(
+    tiny_png: Path,
+    signing_chain: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    cert, key = signing_chain
+    out = tmp_path / "signed.png"
+    sign(tiny_png, out, cert_path=cert, key_path=key)
+
+    result = verify(out, trusted_issuers=(_TEST_ISSUER,))
+    assert result.has_valid_signature is True
+    assert result.is_trusted_issuer is True
+
+
+def test_trust_list_with_unknown_issuer_remains_untrusted(
+    tiny_png: Path,
+    signing_chain: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    cert, key = signing_chain
+    out = tmp_path / "signed.png"
+    sign(tiny_png, out, cert_path=cert, key_path=key)
+
+    result = verify(out, trusted_issuers=("Some Other Org",))
+    assert result.has_valid_signature is True
+    assert result.is_trusted_issuer is False
+
+
+def test_no_manifest_is_never_trusted(tiny_png: Path) -> None:
+    result = verify(tiny_png, trusted_issuers=(_TEST_ISSUER,))
+    assert result.has_valid_signature is False
+    assert result.is_trusted_issuer is False
+
+
+def test_tampered_signature_is_never_trusted_even_with_matching_cn(
+    tiny_png: Path,
+    signing_chain: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    """Tampered manifest ⇒ ``is_trusted_issuer=False`` even if the CN matches.
+
+    Trust on an invalid signature is meaningless — an attacker may have spoofed
+    the CN onto a forged manifest. Defence-in-depth (ACM 1.2): trust requires
+    BOTH the allow-list match AND cryptographic validity.
+    """
+    cert, key = signing_chain
+    out = tmp_path / "signed.png"
+    sign(tiny_png, out, cert_path=cert, key_path=key)
+
+    blob = bytearray(out.read_bytes())
+    blob[-100] ^= 0x55
+    out.write_bytes(bytes(blob))
+
+    result = verify(out, trusted_issuers=(_TEST_ISSUER,))
+    assert result.has_valid_signature is False
+    assert result.is_trusted_issuer is False
+
+
+def test_provenance_verify_tool_logs_trust_signal(
+    tiny_png: Path,
+    signing_chain: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    """The audit payload must carry ``is_trusted_issuer`` so the F5 chain
+    distinguishes valid-but-untrusted from valid-and-trusted (ACM 3.1 / 3.7)."""
+    cert, key = signing_chain
+    out = tmp_path / "signed.png"
+    sign(tiny_png, out, cert_path=cert, key_path=key)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+
+    provenance_verify(out, audit=audit, trusted_issuers=(_TEST_ISSUER,))
+    records = audit.read_all()
+    assert len(records) == 1
+    payload = records[0].payload
+    assert payload["has_valid_signature"] is True
+    assert payload["is_trusted_issuer"] is True
+    assert audit.verify_chain() is True
